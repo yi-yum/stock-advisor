@@ -1,0 +1,16 @@
+# API Key
+.env
+
+# 歷史紀錄（本地端留著，不上傳）
+history.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# 虛擬環境
+venv/
+.venv/
+env/
