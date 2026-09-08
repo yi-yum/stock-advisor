@@ -122,6 +122,10 @@ with tab_analyze:
                     with st.spinner(f"Gemini 正在分析 {symbol}..."):
                         result = analyze_stock(stock_data)
 
+                    if result.get("error"):
+                        st.error(result["error"])
+                        continue
+
                     # 產生 Claude prompt
                     macd_dir = "金叉（多頭）" if stock_data['macd_histogram'] and stock_data['macd_histogram'] > 0 else "死叉（空頭）"
 

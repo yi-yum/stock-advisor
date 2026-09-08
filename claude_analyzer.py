@@ -235,6 +235,7 @@ def build_user_message(data: dict) -> str:
 
 def analyze_stock(stock_data: dict) -> dict:
     import time
+    import streamlit as st
     asset_type = stock_data.get("asset_type", "us")
 
     model = genai.GenerativeModel(
@@ -242,7 +243,7 @@ def analyze_stock(stock_data: dict) -> dict:
         system_instruction=PROMPTS[asset_type],
     )
 
-    # 自動重試，遇到速率限制最多等待 3 次
+    last_error = ""
     for attempt in range(3):
         try:
             response = model.generate_content(build_user_message(stock_data))
@@ -251,15 +252,28 @@ def analyze_stock(stock_data: dict) -> dict:
                 "asset_type": asset_type,
                 "price": stock_data["current_price"],
                 "analysis": response.text,
+                "error": None,
             }
         except Exception as e:
-            err = str(e)
-            if "ResourceExhausted" in err or "429" in err:
-                wait = (attempt + 1) * 15  # 15秒、30秒、45秒
-                import streamlit as st
+            last_error = str(e)
+            if "ResourceExhausted" in last_error or "429" in last_error:
+                wait = (attempt + 1) * 15
                 st.warning(f"⏳ Gemini 速率限制，{wait} 秒後自動重試（第 {attempt + 1}/3 次）...")
                 time.sleep(wait)
             else:
-                raise
+                # 非速率限制的錯誤，直接回傳錯誤訊息不崩潰
+                return {
+                    "symbol": stock_data["symbol"],
+                    "asset_type": asset_type,
+                    "price": stock_data["current_price"],
+                    "analysis": "",
+                    "error": f"Gemini 分析失敗：{last_error[:200]}",
+                }
 
-    raise Exception("Gemini API 已達速率上限，請稍後再試（免費版每分鐘限 15 次請求）")
+    return {
+        "symbol": stock_data["symbol"],
+        "asset_type": asset_type,
+        "price": stock_data["current_price"],
+        "analysis": "",
+        "error": "已達 Gemini 速率上限，請稍候幾分鐘後重試（免費版每分鐘限 15 次）",
+    }
