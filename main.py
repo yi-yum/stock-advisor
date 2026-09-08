@@ -192,6 +192,13 @@ with tab_analyze:
 - 52週低點：{cur}{stock_data['low_52w']}（距低點 +{stock_data['pct_from_52w_low']}%）
 {f"- 下次財報：{stock_data['earnings_info']}" if stock_data.get('earnings_info') else ""}
 
+多時框架原始數值
+{chr(10).join([
+    f"- {label}：RSI {tf_data['rsi']}　MACD {tf_data['macd_direction']}　MA20 {'上方' if tf_data.get('above_ma20') else '下方'}　MA50 {'上方' if tf_data.get('above_ma50') else '下方' if tf_data.get('ma50') else 'N/A'}　→ {tf_data['bias']}"
+    if (tf_data := stock_data.get('timeframes', {}).get(key)) else f"- {label}：資料不足"
+    for key, label in [('weekly','週線'),('daily','日線'),('h4','4H'),('h1','1H')]
+])}
+
 ══════════════════════════════
 【Gemini 的分析結論】
 ══════════════════════════════
