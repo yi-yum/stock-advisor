@@ -257,7 +257,7 @@ def analyze_stock(stock_data: dict) -> dict:
         except Exception as e:
             last_error = str(e)
             if "ResourceExhausted" in last_error or "429" in last_error:
-                wait = (attempt + 1) * 15
+                wait = (attempt + 1) * 30  # 30秒、60秒、90秒
                 st.warning(f"⏳ Gemini 速率限制，{wait} 秒後自動重試（第 {attempt + 1}/3 次）...")
                 time.sleep(wait)
             else:
