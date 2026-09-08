@@ -215,7 +215,7 @@ with tab_analyze:
                     st.toast(f"✅ {symbol} 已自動儲存", icon="💾")
 
                     if i < len(symbols) - 1:
-                        time.sleep(1)
+                        time.sleep(5)  # 免費版每分鐘15次，間隔5秒較安全
 
                 st.success("✅ 分析完成，結果已儲存至歷史紀錄")
         else:
