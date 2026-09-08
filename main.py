@@ -99,6 +99,18 @@ with tab_analyze:
                     asset_type = stock_data["asset_type"]
                     cur = stock_data["currency"]
 
+                    # 多時框架偏向顯示
+                    tf = stock_data.get("timeframes", {})
+                    tf_labels = {"weekly": "週線", "daily": "日線", "h4": "4H", "h1": "1H"}
+                    tf_cols = st.columns(4)
+                    for idx, (key, label) in enumerate(tf_labels.items()):
+                        d = tf.get(key)
+                        if d:
+                            color = "🟢" if d["bias"] == "偏多" else ("🔴" if d["bias"] == "偏空" else "🟡")
+                            tf_cols[idx].metric(label, f"{color} {d['bias']}", f"RSI {d['rsi']}")
+                        else:
+                            tf_cols[idx].metric(label, "—")
+
                     with st.spinner(f"Gemini 正在分析 {symbol}..."):
                         result = analyze_stock(stock_data)
 

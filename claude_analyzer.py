@@ -131,6 +131,23 @@ PROMPTS = {
 }
 
 
+def build_tf_block(tf: dict) -> str:
+    """把多時框架摘要轉成文字"""
+    labels = {"weekly": "週線", "daily": "日線", "h4": "4H", "h1": "1H"}
+    lines = []
+    for key, label in labels.items():
+        d = tf.get(key)
+        if not d:
+            lines.append(f"- {label}：資料不足")
+            continue
+        ma20_str = f"MA20 {'上方' if d.get('above_ma20') else '下方'}" if d.get('above_ma20') is not None else ""
+        ma50_str = f"MA50 {'上方' if d.get('above_ma50') else '下方'}" if d.get('above_ma50') is not None else ""
+        lines.append(
+            f"- {label}：RSI {d['rsi']}　MACD {d['macd_direction']}　{ma20_str}　{ma50_str}　→ **{d['bias']}**"
+        )
+    return "\n".join(lines)
+
+
 def build_user_message(data: dict) -> str:
     cur = data["currency"]
     asset_type = data["asset_type"]
@@ -153,6 +170,8 @@ def build_user_message(data: dict) -> str:
         ma_lines = f"""- MA20：{data['ma20']}（{'上方' if data.get('above_ma20') else '下方'}，斜率 {data['ma20_slope']}%/5日）
 - MA50：{data['ma50'] or '資料不足'}（{'上方' if data.get('above_ma50') else '下方' if data['ma50'] else 'N/A'}）"""
 
+    tf_block = build_tf_block(data.get("timeframes", {}))
+
     return f"""請分析以下數據並給出買入建議：
 
 ## {data['symbol']} 技術數據
@@ -161,10 +180,13 @@ def build_user_message(data: dict) -> str:
 - 當前價格：{cur}{data['current_price']}（今日 {'+' if data['change_pct'] > 0 else ''}{data['change_pct']}%）
 - 5日報酬：{'+' if data['return_5d'] > 0 else ''}{data['return_5d']}%（5日前 {cur}{data['price_5d_ago']}）
 
-**均線**
+**多時框架偏向**
+{tf_block}
+
+**日線均線**
 {ma_lines}
 
-**動能指標**
+**日線動能指標**
 - RSI(14)：{data['rsi']}
 - MACD：{data['macd']}，Signal：{data['macd_signal']}，Histogram：{data['macd_histogram']}（{macd_dir}）
 
@@ -175,7 +197,7 @@ def build_user_message(data: dict) -> str:
 - 52週高點：{cur}{data['high_52w']}（距高點 {data['pct_from_52w_high']}%）
 - 52週低點：{cur}{data['low_52w']}（距低點 +{data['pct_from_52w_low']}%）
 
-請依照三步驟格式進行分析。"""
+分析時請優先從週線判斷大趨勢方向，再看日線確認中期趨勢，最後用4H/1H找進場時機。請依照三步驟格式進行分析。"""
 
 
 def analyze_stock(stock_data: dict) -> dict:
