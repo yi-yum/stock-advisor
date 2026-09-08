@@ -160,15 +160,25 @@ with tab_analyze:
 {ma_block}
 
 動能指標
-- RSI(14)：{stock_data['rsi']}
+- RSI(14)：{stock_data['rsi']}　背離：{stock_data.get('rsi_divergence', 'N/A')}
 - MACD：{stock_data['macd']}，Signal：{stock_data['macd_signal']}，Histogram：{stock_data['macd_histogram']}（{macd_dir}）
+
+布林通道
+- 上軌：{cur}{stock_data.get('bb_upper')}　下軌：{cur}{stock_data.get('bb_lower')}
+- 當前位置：{stock_data.get('bb_position', 'N/A')}
 
 量能
 - 量比：{stock_data['volume_ratio']}x
+- OBV：{stock_data.get('obv_signal', 'N/A')}
+
+波動率
+- ATR(14)：{cur}{stock_data.get('atr')}（波動率 {stock_data.get('atr_pct')}%）
+- ATR 建議停損：{cur}{stock_data.get('atr_stop')}
 
 價格位置
 - 52週高點：{cur}{stock_data['high_52w']}（距高點 {stock_data['pct_from_52w_high']}%）
 - 52週低點：{cur}{stock_data['low_52w']}（距低點 +{stock_data['pct_from_52w_low']}%）
+{f"- 下次財報：{stock_data['earnings_info']}" if stock_data.get('earnings_info') else ""}
 
 ══════════════════════════════
 【Gemini 的分析結論】

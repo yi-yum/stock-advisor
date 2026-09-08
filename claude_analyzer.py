@@ -187,17 +187,27 @@ def build_user_message(data: dict) -> str:
 {ma_lines}
 
 **日線動能指標**
-- RSI(14)：{data['rsi']}
+- RSI(14)：{data['rsi']}　背離：{data.get('rsi_divergence', 'N/A')}
 - MACD：{data['macd']}，Signal：{data['macd_signal']}，Histogram：{data['macd_histogram']}（{macd_dir}）
+
+**布林通道**
+- 上軌：{cur}{data.get('bb_upper')}　下軌：{cur}{data.get('bb_lower')}
+- 當前位置：{data.get('bb_position', 'N/A')}　通道寬度：{data.get('bb_width')}%
 
 **量能**
 - 量比：{data['volume_ratio']}x（{volume_desc}）
+- OBV：{data.get('obv_signal', 'N/A')}
+
+**波動率與停損參考**
+- ATR(14)：{cur}{data.get('atr')}（波動率 {data.get('atr_pct')}%）
+- ATR 建議停損位：{cur}{data.get('atr_stop')}（1.5x ATR）
 
 **價格位置**
 - 52週高點：{cur}{data['high_52w']}（距高點 {data['pct_from_52w_high']}%）
 - 52週低點：{cur}{data['low_52w']}（距低點 +{data['pct_from_52w_low']}%）
+{f"- 下次財報：{data['earnings_info']}" if data.get('earnings_info') else ""}
 
-分析時請優先從週線判斷大趨勢方向，再看日線確認中期趨勢，最後用4H/1H找進場時機。請依照三步驟格式進行分析。"""
+分析時請優先從週線判斷大趨勢方向，再看日線確認中期趨勢，最後用4H/1H找進場時機。停損位請參考ATR建議，不要設定固定百分比。請依照三步驟格式進行分析。"""
 
 
 def analyze_stock(stock_data: dict) -> dict:
