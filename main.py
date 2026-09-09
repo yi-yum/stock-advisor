@@ -152,21 +152,32 @@ with tab_analyze:
                 sentiment_key = f"analysis_sentiment_{symbol}"
                 sentiment_data = st.session_state.get(sentiment_key)
 
+                # 優先從社群頁快取取用，避免兩邊數字不一致
+                if not sentiment_data:
+                    cached = st.session_state.get("st_sentiment_cache", {}).get(symbol)
+                    if cached:
+                        sentiment_data = cached
+                        st.session_state[sentiment_key] = cached
+
                 st_col, gemini_col = st.columns([1, 2])
                 if st_col.button(f"📊 抓取 StockTwits 情緒", key=f"st_fetch_{symbol}"):
                     with st.spinner(f"抓取 ${symbol} 社群討論..."):
                         fetched_sentiment = fetch_symbol_with_sentiment(symbol)
                     if fetched_sentiment:
                         st.session_state[sentiment_key] = fetched_sentiment
+                        # 同步更新共用快取
+                        cache = st.session_state.get("st_sentiment_cache", {})
+                        cache[symbol] = fetched_sentiment
+                        st.session_state["st_sentiment_cache"] = cache
                         sentiment_data = fetched_sentiment
                     else:
                         st.warning(f"StockTwits 無 ${symbol} 的近期貼文")
 
                 if sentiment_data:
                     mood_icon = {"偏多": "🟢", "偏空": "🔴", "分歧": "🟡", "無標記": "⚪"}
-                    mood = sentiment_data.get("mood", "無標記")
-                    bull = sentiment_data.get("bullish_pct")
-                    bear = sentiment_data.get("bearish_pct")
+                    mood  = sentiment_data.get("mood", "無標記")
+                    bull  = sentiment_data.get("bullish_pct")
+                    bear  = sentiment_data.get("bearish_pct")
                     total = sentiment_data.get("total", 0)
                     gemini_col.info(
                         f"{mood_icon.get(mood,'⚪')} 社群情緒：{mood}　"
@@ -198,6 +209,29 @@ with tab_analyze:
                         else:
                             ma_block = f"- MA20：{stock_data['ma20']}（{'上方' if stock_data.get('above_ma20') else '下方'}，斜率 {stock_data['ma20_slope']}%/5日）\n- MA50：{stock_data['ma50'] or '資料不足'}"
                             strategy_block = "1. 動能追蹤\n2. 區間交易\n3. 突破策略\n4. 分批建倉\n5. 觀望"
+
+                        # 組裝情緒區塊（在 f-string 外先處理，避免巢狀語法問題）
+                        if sentiment_data:
+                            sd = sentiment_data
+                            if sd.get("bullish_pct") is not None:
+                                sent_dist = f"看多 {sd['bullish_pct']}% / 看空 {sd['bearish_pct']}%（共 {sd['total']} 筆，整體氛圍：{sd['mood']}）"
+                            else:
+                                sent_dist = f"無標記數據（共 {sd.get('total', 0)} 筆）"
+                            post_lines = "\n".join([
+                                f"- [{p['created']}] @{p['user']} "
+                                f"{'[看多]' if p['sentiment'] == 'Bullish' else '[看空]' if p['sentiment'] == 'Bearish' else '[未標記]'} "
+                                f"{p['body'][:100]}"
+                                for p in sd.get("posts", [])[:8]
+                            ])
+                            sentiment_claude_block = f"\n社群情緒面（StockTwits）\n- 情緒分佈：{sent_dist}\n- 近期貼文：\n{post_lines}"
+                            sentiment_q = "\n3. 社群情緒面（StockTwits）是否與技術面共鳴或背離？對近期股價有何潛在影響？"
+                            q4 = "4."
+                            q5 = "5."
+                        else:
+                            sentiment_claude_block = ""
+                            sentiment_q = ""
+                            q4 = "3."
+                            q5 = "4."
 
                         claude_prompt = f"""你是一位專業的技術分析師。請【先根據下方原始數據獨立分析】，再與 Gemini 的結論比較，最後給出你自己的判斷。
 
@@ -231,9 +265,10 @@ ATR 建議停損：{cur}{stock_data.get('atr_stop')}
 
 消息面
 {chr(10).join([f"- [{n['date']}] {n['title']}" for n in stock_data.get('news', [])]) or "- 無近期新聞"}
+{sentiment_claude_block}
 
 多時框架
-{chr(10).join([f"- {label}：RSI {d['rsi']}　MACD {d['macd_direction']}　→ {d['bias']}" if (d := stock_data.get('timeframes', {}).get(key)) else f"- {label}：資料不足" for key, label in [('weekly','週線'),('daily','日線'),('h4','4H'),('h1','1H')]])}
+{chr(10).join([f"- {label}：RSI {d['rsi']}　MACD {d['macd_direction']}　-> {d['bias']}" if (d := stock_data.get('timeframes', {}).get(key)) else f"- {label}：資料不足" for key, label in [('weekly','週線'),('daily','日線'),('h4','4H'),('h1','1H')]])}
 
 ══════════════════════════════
 【Gemini 分析結論】
@@ -243,10 +278,10 @@ ATR 建議停損：{cur}{stock_data.get('atr_stop')}
 ══════════════════════════════
 【請依序回答】
 ══════════════════════════════
-1. 你看完原始數據後的判斷與策略？{'（含做多/做空方向）' if asset_type == 'crypto' else ''}
-2. 你與 Gemini 的相同與不同之處？
-3. 最終操作建議（進場、停損、目標）
-4. 持倉管理（獲利中/虧損中各如何處理）
+1. 你看完原始數據後的判斷與策略？{"（含做多/做空方向）" if asset_type == "crypto" else ""}
+2. 你與 Gemini 的相同與不同之處？{sentiment_q}
+{q4} 最終操作建議（進場、停損、目標）
+{q5} 持倉管理（獲利中/虧損中各如何處理）
 
 請用繁體中文回答。"""
 
@@ -374,22 +409,25 @@ with tab_btc:
         if btc["funding"]:
             fr = btc["funding"]["funding_rate"]
             fr_label = "偏高⚠️" if fr > 0.02 else ("為負✅" if fr < 0 else "中性")
-            cm1.metric("資金費率", f"{fr}%", fr_label)
+            src = btc["funding"].get("source", "")
+            cm1.metric("資金費率", f"{fr}%", fr_label, help=f"來源：{src}")
         else:
-            cm1.metric("資金費率", "無法取得")
+            cm1.metric("資金費率", "無法取得", help="Binance 及 Bybit 均無回應，請確認網路")
 
         if btc["oi"]:
             chg = btc["oi"]["oi_change_6h"]
-            cm2.metric("未平倉量 OI", f"{btc['oi']['oi']:,.0f} BTC", f"6h {chg:+}%" if chg is not None else "")
+            src = btc["oi"].get("source", "")
+            cm2.metric("未平倉量 OI", f"{btc['oi']['oi']:,.0f}", f"6h {chg:+}%" if chg is not None else "", help=f"來源：{src}")
         else:
-            cm2.metric("未平倉量 OI", "無法取得")
+            cm2.metric("未平倉量 OI", "無法取得", help="Binance 及 Bybit 均無回應")
 
         if btc["ls_ratio"]:
             ls = btc["ls_ratio"]
+            src = ls.get("source", "")
             cm3.metric("多空比", f"{ls['ratio']}",
-                       f"多 {ls['long_pct']}% / 空 {ls['short_pct']}%")
+                       f"多 {ls['long_pct']}% / 空 {ls['short_pct']}%", help=f"來源：{src}")
         else:
-            cm3.metric("多空比", "無法取得")
+            cm3.metric("多空比", "無法取得", help="Binance 及 Bybit 均無回應")
 
         st.divider()
 
@@ -648,6 +686,12 @@ with tab_st:
         st.session_state["st_trending_data"] = results
         st.session_state.pop("st_trending_gemini", None)
         st.session_state.pop("st_detail", None)
+
+        # 寫入跨頁簽共用快取，讓新分析頁可直接取用
+        cache = st.session_state.get("st_sentiment_cache", {})
+        for r in results:
+            cache[r["symbol"]] = r
+        st.session_state["st_sentiment_cache"] = cache
 
     if "st_trending_data" in st.session_state:
         results = st.session_state["st_trending_data"]

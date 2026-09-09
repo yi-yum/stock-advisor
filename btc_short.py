@@ -7,8 +7,9 @@ from stock_data import (
 )
 
 BINANCE_FAPI = "https://fapi.binance.com"
+BYBIT_API    = "https://api.bybit.com"
 
-# 支援的幣種（需有 Binance 合約）
+# 支援的幣種（需有 Binance / Bybit 合約）
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "ADA", "SUI"]
 
 
@@ -19,9 +20,9 @@ def _yf_symbol(coin: str) -> str:
     return f"{coin.upper()}-USD"
 
 
-# ── Binance 公開 API ──────────────────────────────────
+# ── Binance 公開 API（主要來源） ──────────────────────
 
-def get_funding_rate(coin: str) -> dict | None:
+def _get_funding_rate_binance(coin: str) -> dict | None:
     try:
         r = requests.get(f"{BINANCE_FAPI}/fapi/v1/premiumIndex",
                          params={"symbol": _binance_symbol(coin)}, timeout=5)
@@ -30,12 +31,13 @@ def get_funding_rate(coin: str) -> dict | None:
         return {
             "funding_rate": fr,
             "mark_price":   safe_round(float(d["markPrice"])),
+            "source":       "Binance",
         }
     except Exception:
         return None
 
 
-def get_open_interest(coin: str) -> dict | None:
+def _get_open_interest_binance(coin: str) -> dict | None:
     try:
         r = requests.get(f"{BINANCE_FAPI}/futures/data/openInterestHist",
                          params={"symbol": _binance_symbol(coin), "period": "1h", "limit": 7}, timeout=5)
@@ -48,12 +50,13 @@ def get_open_interest(coin: str) -> dict | None:
         return {
             "oi":           safe_round(oi_now),
             "oi_change_6h": oi_change,
+            "source":       "Binance",
         }
     except Exception:
         return None
 
 
-def get_long_short_ratio(coin: str) -> dict | None:
+def _get_long_short_binance(coin: str) -> dict | None:
     try:
         r = requests.get(f"{BINANCE_FAPI}/futures/data/globalLongShortAccountRatio",
                          params={"symbol": _binance_symbol(coin), "period": "5m", "limit": 1}, timeout=5)
@@ -64,9 +67,82 @@ def get_long_short_ratio(coin: str) -> dict | None:
             "ratio":     safe_round(float(data[0]["longShortRatio"]), 3),
             "long_pct":  safe_round(float(data[0]["longAccount"])  * 100, 1),
             "short_pct": safe_round(float(data[0]["shortAccount"]) * 100, 1),
+            "source":    "Binance",
         }
     except Exception:
         return None
+
+
+# ── Bybit 公開 API（備援來源） ────────────────────────
+
+def _get_funding_rate_bybit(coin: str) -> dict | None:
+    try:
+        r = requests.get(f"{BYBIT_API}/v5/market/tickers",
+                         params={"category": "linear", "symbol": _binance_symbol(coin)}, timeout=5)
+        item = r.json()["result"]["list"][0]
+        fr = safe_round(float(item["fundingRate"]) * 100, 4)
+        return {
+            "funding_rate": fr,
+            "mark_price":   safe_round(float(item["markPrice"])),
+            "source":       "Bybit",
+        }
+    except Exception:
+        return None
+
+
+def _get_open_interest_bybit(coin: str) -> dict | None:
+    try:
+        r = requests.get(f"{BYBIT_API}/v5/market/open-interest",
+                         params={"category": "linear", "symbol": _binance_symbol(coin),
+                                 "intervalTime": "1h", "limit": 7}, timeout=5)
+        hist = r.json()["result"]["list"]
+        if not hist or len(hist) < 2:
+            return None
+        # Bybit 回傳由新到舊，反轉取得時序
+        hist = list(reversed(hist))
+        oi_now    = float(hist[-1]["openInterest"])
+        oi_6h_ago = float(hist[0]["openInterest"])
+        oi_change = safe_round((oi_now - oi_6h_ago) / oi_6h_ago * 100, 2)
+        return {
+            "oi":           safe_round(oi_now),
+            "oi_change_6h": oi_change,
+            "source":       "Bybit",
+        }
+    except Exception:
+        return None
+
+
+def _get_long_short_bybit(coin: str) -> dict | None:
+    try:
+        r = requests.get(f"{BYBIT_API}/v5/market/account-ratio",
+                         params={"category": "linear", "symbol": _binance_symbol(coin),
+                                 "period": "5min", "limit": 1}, timeout=5)
+        item = r.json()["result"]["list"][0]
+        buy  = safe_round(float(item["buyRatio"])  * 100, 1)
+        sell = safe_round(float(item["sellRatio"]) * 100, 1)
+        ratio = safe_round(buy / sell, 3) if sell else None
+        return {
+            "ratio":     ratio,
+            "long_pct":  buy,
+            "short_pct": sell,
+            "source":    "Bybit",
+        }
+    except Exception:
+        return None
+
+
+# ── 公開函式：Binance 優先，失敗自動切 Bybit ─────────
+
+def get_funding_rate(coin: str) -> dict | None:
+    return _get_funding_rate_binance(coin) or _get_funding_rate_bybit(coin)
+
+
+def get_open_interest(coin: str) -> dict | None:
+    return _get_open_interest_binance(coin) or _get_open_interest_bybit(coin)
+
+
+def get_long_short_ratio(coin: str) -> dict | None:
+    return _get_long_short_binance(coin) or _get_long_short_bybit(coin)
 
 
 # ── 多時框架技術分析 ─────────────────────────────────
