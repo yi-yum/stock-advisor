@@ -9,7 +9,7 @@ CRYPTO_SYMBOLS = {
 
 
 def detect_asset_type(symbol: str) -> str:
-    if symbol.endswith(".TW"):
+    if symbol.endswith(".TW") or symbol.endswith(".TWO"):
         return "taiwan"
     elif symbol.endswith("-USD") or symbol in CRYPTO_SYMBOLS:
         return "crypto"
@@ -112,6 +112,98 @@ def get_earnings_info(ticker, asset_type):
     except Exception:
         pass
     return None
+
+
+def get_news(ticker, max_items=5) -> list:
+    """抓最新新聞標題與摘要"""
+    try:
+        news = ticker.news
+        if not news:
+            return []
+        result = []
+        for item in news[:max_items]:
+            content = item.get("content", {})
+            title = content.get("title", "")
+            summary = content.get("summary", "")
+            pub_date = content.get("pubDate", "")[:10] if content.get("pubDate") else ""
+            if title:
+                result.append({
+                    "title": title,
+                    "summary": summary[:150] if summary else "",
+                    "date": pub_date,
+                })
+        return result
+    except Exception:
+        return []
+
+
+def detect_candlestick_patterns(df: pd.DataFrame) -> list:
+    """偵測最近K棒型態"""
+    patterns = []
+    if len(df) < 3:
+        return ["資料不足"]
+
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-3]
+
+    def body(c):         return abs(float(c["Close"]) - float(c["Open"]))
+    def range_(c):       return float(c["High"]) - float(c["Low"])
+    def upper_shadow(c): return float(c["High"]) - max(float(c["Close"]), float(c["Open"]))
+    def lower_shadow(c): return min(float(c["Close"]), float(c["Open"])) - float(c["Low"])
+    def is_bull(c):      return float(c["Close"]) > float(c["Open"])
+    def is_bear(c):      return float(c["Close"]) < float(c["Open"])
+
+    r0 = range_(c0)
+    if r0 == 0:
+        return ["無明顯K線型態"]
+
+    b0 = body(c0)
+    us0 = upper_shadow(c0)
+    ls0 = lower_shadow(c0)
+
+    # 十字星
+    if b0 / r0 < 0.1:
+        patterns.append("十字星（方向不明，等待確認）")
+
+    # 錘頭（看漲）
+    if b0 / r0 < 0.35 and ls0 >= 2 * b0 and us0 <= b0 * 0.5:
+        patterns.append("錘頭（潛在底部反轉訊號）")
+
+    # 射擊之星（看跌）
+    if b0 / r0 < 0.35 and us0 >= 2 * b0 and ls0 <= b0 * 0.5:
+        patterns.append("射擊之星（潛在頂部反轉訊號）")
+
+    # 上吊線（看跌，需在高位）
+    if is_bear(c0) and b0 / r0 < 0.35 and ls0 >= 2 * b0 and us0 <= b0 * 0.5:
+        patterns.append("上吊線（上漲趨勢末端警示）")
+
+    # 多頭吞噬（看漲）
+    if (is_bear(c1) and is_bull(c0)
+            and float(c0["Open"]) <= float(c1["Close"])
+            and float(c0["Close"]) >= float(c1["Open"])):
+        patterns.append("多頭吞噬（看漲反轉訊號）")
+
+    # 空頭吞噬（看跌）
+    if (is_bull(c1) and is_bear(c0)
+            and float(c0["Open"]) >= float(c1["Close"])
+            and float(c0["Close"]) <= float(c1["Open"])):
+        patterns.append("空頭吞噬（看跌反轉訊號）")
+
+    # 早晨之星（看漲，3根）
+    r1 = range_(c1)
+    if (is_bear(c2) and r1 > 0 and body(c1) / r1 < 0.3
+            and is_bull(c0)
+            and float(c0["Close"]) > (float(c2["Open"]) + float(c2["Close"])) / 2):
+        patterns.append("早晨之星（強力底部反轉訊號）")
+
+    # 黃昏之星（看跌，3根）
+    if (is_bull(c2) and r1 > 0 and body(c1) / r1 < 0.3
+            and is_bear(c0)
+            and float(c0["Close"]) < (float(c2["Open"]) + float(c2["Close"])) / 2):
+        patterns.append("黃昏之星（強力頂部反轉訊號）")
+
+    return patterns if patterns else ["無明顯K線型態"]
 
 
 # ── 多時框架 ─────────────────────────────────────────
@@ -262,6 +354,16 @@ def get_stock_data(symbol: str):
         # ── 財報日期（美股）──────────────────────
         earnings_info = get_earnings_info(ticker, asset_type)
 
+        # ── 新聞 ─────────────────────────────────
+        news = get_news(ticker)
+
+        # ── K線型態 ──────────────────────────────
+        candlestick_patterns = {
+            "weekly": detect_candlestick_patterns(df_w),
+            "daily":  detect_candlestick_patterns(df_d),
+            "h4":     detect_candlestick_patterns(df_4h) if not df_4h.empty else ["資料不足"],
+        }
+
         currency = "NT$" if asset_type == "taiwan" else "$"
 
         summary = {
@@ -302,6 +404,8 @@ def get_stock_data(symbol: str):
             "obv_signal":  obv_signal,
             "rsi_divergence": rsi_divergence,
             "earnings_info":  earnings_info,
+            "news":           news,
+            "candlestick_patterns": candlestick_patterns,
             # 多時框架
             "timeframes": {
                 "weekly": calc_indicators(df_w),
