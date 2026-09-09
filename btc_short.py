@@ -8,6 +8,7 @@ from stock_data import (
 
 BINANCE_FAPI = "https://fapi.binance.com"
 BYBIT_API    = "https://api.bybit.com"
+OKX_API      = "https://www.okx.com"
 
 # 支援的幣種（需有 Binance / Bybit 合約）
 SUPPORTED_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "ADA", "SUI"]
@@ -131,18 +132,81 @@ def _get_long_short_bybit(coin: str) -> dict | None:
         return None
 
 
-# ── 公開函式：Binance 優先，失敗自動切 Bybit ─────────
+# ── OKX 公開 API（第三備援，Streamlit Cloud 可達）─────
+
+def _get_funding_rate_okx(coin: str) -> dict | None:
+    try:
+        inst = f"{coin.upper()}-USDT-SWAP"
+        r = requests.get(f"{OKX_API}/api/v5/public/funding-rate",
+                         params={"instId": inst}, timeout=5)
+        d = r.json()
+        if d.get("code") != "0" or not d.get("data"):
+            return None
+        item = d["data"][0]
+        fr = safe_round(float(item["fundingRate"]) * 100, 4)
+        return {
+            "funding_rate": fr,
+            "mark_price":   safe_round(float(item.get("markPrice", 0))),
+            "source":       "OKX",
+        }
+    except Exception:
+        return None
+
+
+def _get_open_interest_okx(coin: str) -> dict | None:
+    try:
+        r = requests.get(f"{OKX_API}/api/v5/rubik/stat/contracts/open-interest-history",
+                         params={"ccy": coin.upper(), "period": "1H", "limit": 7}, timeout=5)
+        d = r.json()
+        if d.get("code") != "0" or not d.get("data") or len(d["data"]) < 2:
+            return None
+        hist = d["data"]  # OKX 由舊到新
+        oi_now    = float(hist[-1][1])   # [ts, oi, oiCcy]
+        oi_6h_ago = float(hist[0][1])
+        oi_change = safe_round((oi_now - oi_6h_ago) / oi_6h_ago * 100, 2) if oi_6h_ago else None
+        return {
+            "oi":           safe_round(oi_now),
+            "oi_change_6h": oi_change,
+            "source":       "OKX",
+        }
+    except Exception:
+        return None
+
+
+def _get_long_short_okx(coin: str) -> dict | None:
+    try:
+        r = requests.get(f"{OKX_API}/api/v5/rubik/stat/contracts/long-short-account-ratio-history",
+                         params={"ccy": coin.upper(), "period": "5m", "limit": 1}, timeout=5)
+        d = r.json()
+        if d.get("code") != "0" or not d.get("data"):
+            return None
+        item = d["data"][0]   # [ts, longShortRatio]
+        ratio = safe_round(float(item[1]), 3)
+        # OKX 只給多空比，反推多/空百分比
+        long_pct  = safe_round(ratio / (1 + ratio) * 100, 1)
+        short_pct = safe_round(100 - long_pct, 1)
+        return {
+            "ratio":     ratio,
+            "long_pct":  long_pct,
+            "short_pct": short_pct,
+            "source":    "OKX",
+        }
+    except Exception:
+        return None
+
+
+# ── 公開函式：Binance → Bybit → OKX 依序嘗試 ────────
 
 def get_funding_rate(coin: str) -> dict | None:
-    return _get_funding_rate_binance(coin) or _get_funding_rate_bybit(coin)
+    return _get_funding_rate_binance(coin) or _get_funding_rate_bybit(coin) or _get_funding_rate_okx(coin)
 
 
 def get_open_interest(coin: str) -> dict | None:
-    return _get_open_interest_binance(coin) or _get_open_interest_bybit(coin)
+    return _get_open_interest_binance(coin) or _get_open_interest_bybit(coin) or _get_open_interest_okx(coin)
 
 
 def get_long_short_ratio(coin: str) -> dict | None:
-    return _get_long_short_binance(coin) or _get_long_short_bybit(coin)
+    return _get_long_short_binance(coin) or _get_long_short_bybit(coin) or _get_long_short_okx(coin)
 
 
 # ── 多時框架技術分析 ─────────────────────────────────
