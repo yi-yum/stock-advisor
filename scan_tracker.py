@@ -19,7 +19,9 @@ import yfinance as yf
 
 logger = logging.getLogger("scan_tracker")
 
-TRACKER_FILE = Path(__file__).parent / "scan_tracker.json"
+TRACKER_FILE      = Path(__file__).parent / "scan_tracker.json"
+INTRADAY_SNAP_DIR = Path(__file__).parent / "intraday_snapshots"
+INTRADAY_SNAP_DIR.mkdir(exist_ok=True)
 
 
 # ── 讀寫 ──────────────────────────────────────────────────────────────────────
@@ -61,6 +63,52 @@ def _fetch_entry_day_ohlc(symbol: str, market: str) -> Optional[dict]:
     except Exception as e:
         logger.warning(f"[Tracker] 取得 {symbol} OHLC 失敗: {e}")
         return None
+
+
+def _save_intraday_snapshot(symbol: str, market: str, date_str: str):
+    """
+    抓取並儲存當日 5m / 15m / 30m K 棒到 intraday_snapshots/{date}_{market}_{symbol}.json。
+    yfinance 限制：5m/15m/30m 只能回溯 60 天，需在訊號當天或隔天立即呼叫。
+    """
+    safe_sym  = symbol.replace(".", "_").replace("/", "_")
+    snap_file = INTRADAY_SNAP_DIR / f"{date_str}_{market}_{safe_sym}.json"
+    if snap_file.exists():
+        return  # 已存在，不重複抓
+
+    snapshot = {"symbol": symbol, "market": market, "date": date_str, "timeframes": {}}
+
+    for interval in ("5m", "15m", "30m"):
+        try:
+            df = yf.download(symbol, period="2d", interval=interval,
+                             auto_adjust=True, progress=False)
+            if df.empty:
+                continue
+            # 只保留 date_str 當天的資料
+            df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+            day_df = df[df.index.strftime("%Y-%m-%d") == date_str]
+            if day_df.empty:
+                # fallback：取最後一個交易日
+                last_date = df.index[-1].strftime("%Y-%m-%d")
+                day_df = df[df.index.strftime("%Y-%m-%d") == last_date]
+
+            bars = []
+            for ts, row in day_df.iterrows():
+                bars.append({
+                    "time":   ts.strftime("%H:%M"),
+                    "open":   round(float(row["Open"].iloc[0])   if hasattr(row["Open"],   "iloc") else float(row["Open"]),   4),
+                    "high":   round(float(row["High"].iloc[0])   if hasattr(row["High"],   "iloc") else float(row["High"]),   4),
+                    "low":    round(float(row["Low"].iloc[0])    if hasattr(row["Low"],    "iloc") else float(row["Low"]),    4),
+                    "close":  round(float(row["Close"].iloc[0])  if hasattr(row["Close"],  "iloc") else float(row["Close"]),  4),
+                    "volume": int(row["Volume"].iloc[0]) if hasattr(row["Volume"], "iloc") else int(row["Volume"]),
+                })
+            snapshot["timeframes"][interval] = bars
+            logger.info(f"[Tracker] {symbol} {interval} 快照：{len(bars)} 根")
+        except Exception as e:
+            logger.warning(f"[Tracker] {symbol} {interval} 抓取失敗: {e}")
+
+    with open(snap_file, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    logger.info(f"[Tracker] 日內快照已存：{snap_file.name}")
 
 
 # ── 核心更新邏輯 ───────────────────────────────────────────────────────────────
@@ -166,6 +214,9 @@ def update_tracker(scan_output: dict):
         }
         still_open.append(new_pos)
         logger.info(f"[Tracker] 新增追蹤 {sym}（{r.get('signal_label')}），進場價 {entry}")
+
+        # 儲存日內 K 棒快照（5m/15m/30m），供事後驗證開盤確認過濾效果
+        _save_intraday_snapshot(sym, market, today)
 
     data["open"]   = still_open
     data["closed"] = closed_positions
