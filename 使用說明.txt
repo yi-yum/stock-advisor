@@ -69,12 +69,18 @@
 
   21:00   美股掃描 + K 線圖生成          → api_main.py 自動執行
   21:20   美股 Claude 分析               → Claude Code 自動執行（需開著）
+  22:00   每日盤後總結                   → Claude Code 自動執行（需開著）
+            讀取台股 + 美股所有個股 Claude 分析結果
+            跨市場挑選精選標的並撰寫市場觀察
+            儲存至 scan_results/daily_summary_YYYYMMDD.json
+            前端掃描頁頂部「今日盤後總結」面板自動顯示
 
   ※ Claude Code 排程注意事項（重要）：
      · 排程類型：session-only（預設），關閉 Claude Code 對話即失效
-     · 重新開啟 Claude Code 對話後，CLAUDE.md 會自動重建排程
+     · 重新開啟 Claude Code 對話後，CLAUDE.md 會自動重建三個排程
      · 每次重新開啟對話都需要讓 CLAUDE.md 的初始化指令跑完
      · 若排程消失，只需重開對話即可（無需手動建立）
+     · 排程自動到期：7 天後需重新開啟對話重建
 
   ── 如何確認排程是否存在 ─────────────────────────────────────
      在 Claude Code 中輸入：「目前有哪些排程？」
@@ -111,6 +117,15 @@
     ⚠️ 大盤強但淡季－謹慎進場
     🚫 條件不足－建議觀望
 
+  【今日盤後總結面板（掃描結果 Tab 最頂部）】
+
+  每日 22:00 由 Claude 自動生成，包含：
+  · 今日台股精選：最值得關注的 1-3 支 BUY/WATCH，附選擇原因
+  · 今日美股精選：最值得關注的 1-3 支 BUY/WATCH，附選擇原因
+  · 需特別留意：財報近期警示、假突破風險高、建議跳過的股票
+  · 今日市場觀察：台美股整體訊號品質與大方向
+  面板可折疊，右上角顯示生成日期與時間
+
   【Tab 1：掃描結果】
 
   頂部控制列
@@ -124,10 +139,13 @@
   · 訊號標籤：BUY（綠）/ WATCH（黃）
   · 籌碼共振標籤（青色）：若同時出現在板塊流向買超前30名
   · WATCH升級標籤（紫色）：昨日 WATCH 今日升級 BUY（含連續天數）
+  · 📅 財報近期標籤（橙色）：7 天內有財報，hover 顯示具體日期（美股為主）
   · 股票名稱（含中文名稱，台股）、代號、板塊
   · 收盤價、漲跌幅、RSI、量比
   · 觸發原因（例：三重SuperTrend翻多、量能放大...）
   · 趨勢分數（Trend Score）、進場評分（Entry Score）
+  ※ 靜態 SL/TP/RR 已移除（3ST 為動態止損，固定數字無意義）
+     止損位請參考 Claude 分析中的【操作建議】段落
 
   展開個股（點擊展開）
   ┌─ 左：Claude 技術分析
@@ -141,13 +159,24 @@
 
   開倉部位
   · 每筆 BUY 訊號自動加入追蹤
-  · 顯示：股票 / 板塊 / 進場日期 / 進場價 / 目前價格 / 未實現損益%
-  · 顯示：止損 / 止盈 / 風報比
+  · 顯示：股票 / 板塊 / 進場日期 / 持倉天數 / 進場價 / 目前價格 / 未實現損益%
+  · 當日止損：三條 ST 支撐線最高值，每次掃描後自動更新（動態）
+  · ST多方 N/3：目前仍為多方的 ST 條數（3=全綠/2=警戒/下同）
+  · ⚠️ ST 警戒 badge（黃色閃爍）：green_count 降至 2，接近觸發出場條件
+  · 加碼計畫：以進場當時的風險單位（R = 進場價 − 訊號當時止損）規劃
+    +1R / +2R 兩個加碼點位，金字塔式（首倉50%、加碼各30%/20%），
+    每次加碼後停損同步上移，達到的加碼點會標示 ✅。屬進場當下的
+    靜態規劃，不隨「當日止損」每日更新
   · 可手動關倉（記錄為已實現）
+  ※ 止盈（TP）已移除顯示，策略以 ST 翻空為出場依據
 
   已結倉部位
   · 顯示所有歷史結倉紀錄
   · 欄位：進出場日期 / 進出場價格 / 損益% / 出場原因 / 持有天數
+  · 出場原因顏色：
+    紅色 = ST翻空類（三條ST全翻空 / ST翻空跌破進場價）
+    黃色 = 手動出場
+    灰色 = 其他
 
   績效摘要
   · 總交易次數 / 勝率 / 平均損益% / 累計損益%
@@ -160,59 +189,42 @@
   🪙 /crypto    加密貨幣訊號
 ────────────────────────────────────────────────────────────
 
-  支援幣種：BTC / ETH / SOL / BNB / XRP / DOGE / ADA / AVAX（共 8 幣）
-  策略：VB 波動率收縮突破（Volatility Breakout）
+  支援幣種：BTC / ETH / SOL / BNB / XRP / DOGE / ADA / AVAX / LINK（共 9 幣）
   資料來源：Binance 永續合約（fapi.binance.com）
   自動刷新：每 15 分鐘，倒數計時顯示於標題列
 
-  訊號觸發數量顯示於標題列（X 個訊號觸發）
+  ── Tab 1：策略訊號（預設）──
 
-  ── 總覽模式（預設）──
+  各幣種套用各自最佳化策略的即時進場訊號（per-coin 最佳化）
 
-  4 欄 Grid，同時顯示全部 8 幣，每張卡片顯示：
-  · 幣名 + 目前價格
-  · 訊號標籤：做多入場（綠）/ 做空入場（紅）/ 等待訊號（灰）
-  · 有訊號時：進場價 / 止損 SL / 目標 TP + 風報比（右上角）
-  · 收縮觀察中時：收縮根數 + 上下軌範圍
-  · 底部指標列：4H 趨勢（↑/↓） / 收縮進度（進度條）/ ATR 比率
-  · 點擊任一卡片 → 切換至詳細模式
+  卡片訊號狀態：
+  · 🟢 進場訊號  — 策略條件剛觸發（本根），現在可考慮進場
+  · 趨勢延續中  — 訊號先前已觸發，趨勢仍在但進場時機已過
+  · 等待中      — 策略條件尚未達成
 
-  ── 詳細模式 ──
+  各策略指標顯示（依幣種不同）：
+  · VB（BTC / XRP / LINK）
+    ATR 收縮進度條（X/N 根）/ 收縮區間上下軌 / ATR 比率
+    有訊號時：進場 / SL / TP 三格
+  · 3ST（ETH）
+    三條 SuperTrend 方向箭頭（↑多 / ↓空）/ 多頭條數（N/3）
+  · EMA（SOL / BNB / DOGE / ADA）
+    快線/慢線交叉狀態 + EMA 趨勢線（EMA200）
+    黃金交叉提示 / EMA 間距% / 上次交叉幾根前
+  · DC（AVAX）
+    距 N 根高點百分比（進度條）/ N 根高點價位
 
-  頂部幣種快覽列（8 個按鈕，顯示各幣訊號狀態）
+  趨勢過濾標記（BTC / ETH）：
+  · 日線 EMA200：✓ 多頭區間 / ✗ 空頭區間（不進場）
 
-  大型訊號卡
-  · 幣名 / 全名 / 目前價格
-  · 訊號標籤（做多入場 / 做空入場 / 等待訊號）+ 風報比
+  展開 K 線圖（點擊卡片底部「▼ 展開 K 線圖」）：
+  · EMA 策略：快線（藍）/ 慢線（橙）/ 趨勢線（灰）+ 綠箭頭標進場點
+  · 3ST 策略：K 棒依多頭條數上色（綠=3條/黃=2條/橙=1條/紅=0條）+ 進場箭頭
+  · VB 策略：琥珀色=ATR收縮中 + 進場箭頭
+  · DC 策略：唐奇安通道高低線 + 進場箭頭
+  ※ 進場箭頭（▲）= 最近一次策略訊號觸發時間點
 
-  有訊號時顯示入場詳情（3 格）
-  · 進場價 / 止損 SL（含百分比）/ 目標 TP（含百分比）
-
-  15m K 線圖（lightweight-charts）
-  · K 棒（綠漲 / 紅跌，收縮中以琥珀色標示）
-  · EMA20（藍線）/ EMA50（紫線）
-  · 收縮上下軌（橙色虛線）
-  · 止損 / 止盈線（有訊號時，紅/綠實線）
-  · 4H EMA20 / EMA50（藍/紫虛線，作為水平參考）
-
-  策略邏輯三步驟（VB 說明）
-  · 步驟1：ATR 波動率收縮（≥20根，比率<0.75）
-  · 步驟2：4H 趨勢過濾（EMA20 vs EMA50）
-  · 步驟3：突破觸發入場（收盤突破上/下軌）
-  · 每步顯示：達標 / 等待中 + 目前數值
-
-  止損止盈邏輯說明
-  · LONG SL = 收縮下軌（最大 -5%）/ SHORT SL = 收縮上軌
-  · TP = 進場價 ± 收縮幅度 × 1.5
-
-  收縮觀察區間（WAIT 且有收縮時）
-  · 上軌（突破做多）/ 下軌（跌破做空）
-
-  指標面板（4 格）
-  · ATR 收縮進度（X/20 根，進度條）
-  · 4H 趨勢（↑上升 / ↓下降 + EMA 數值）
-  · ATR 比率（數值 + 進度條，門檻 < 0.75）
-  · 收縮區間幅度（百分比 + 上下軌數值）
+  ※ 舊版 VB 總覽 / VB 詳細 Tab 已移除，頁面只保留策略訊號 Grid
 
 
 ────────────────────────────────────────────────────────────
@@ -402,12 +414,42 @@
   · yfinance 限制：5m/15m/30m 只能回溯 60 天，
     因此需在訊號當天立即抓取，訊號觸發時已自動執行
 
-  出場邏輯：
-  · 訊號消失（不在下次掃描結果中）→ 自動關倉
-  · 跌破止損 → 自動關倉
+  出場邏輯（三重 ST 翻空規則）：
+  · 規則 1：三條 ST 全翻空（green_count == 0）→ 無條件出場
+  · 規則 2：ST 條數減少 且 收盤跌破進場價 → 出場
+      第1條翻空 + 跌破進場價 → 出場「第1條ST翻空，跌破進場價」
+      第2條翻空 + 跌破進場價 → 出場「第2條ST翻空，跌破進場價」
+  · ST 條數減少但收盤仍高於進場價 → 持倉繼續（更新 green_count）
+  · 資料取得失敗 → 保留部位，不強制出場
   · 手動關倉：前端「訊號追蹤」Tab → 點擊出場按鈕
+  ※ 舊邏輯（「訊號消失」→ 隔日關倉）已廢除
+     現在部位可持續追蹤直到 ST 翻空條件觸發
 
   資料檔：scan_tracker.json（自動管理，不需手動修改）
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 結構性回調組合回測工具（backtest_pullback_portfolio.py）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  用途：用與 backtest_portfolio.py 相同方法論（次日開盤成交、同樣手續費、
+       同樣大盤/季節過濾）回測結構性回調策略，跟三重ST公平比較
+  執行方式：python backtest_pullback_portfolio.py --no-download
+           python backtest_pullback_portfolio.py --no-download --taiex-min 3 --season
+
+  2026-09-28 回測結論（台股 2021–2026，~1979支）：
+    策略條件                        筆數     勝率    期望值   平均持倉
+    ──────────────────────────────────────────────────────────
+    三重ST 無過濾                  37,733   35.8%   +1.99%
+    三重ST 大盤3綠+避5–9月         16,133   39.3%   +3.73%
+    結構性回調 無過濾                7,618   25.5%   +3.80%   60.8天
+    結構性回調 大盤3綠+避5–9月       2,555   25.9%   +5.32%   66.9天
+
+    結論：結構性回調每筆期望值略高於三重ST，但屬「低勝率高賠率」型
+    （每4筆輸3筆，靠少數大賺覆蓋多數小賠），訊號數只有三重ST的1/6，
+    平均持倉67天（三重ST明顯較短）。在單一個股回測上會看起來績效很差
+    （連續虧損居多），但組合層級統計期望值是正的。
+    → 決定：保留在回測頁供參考，但不接入每日掃描器，三重ST仍為主力策略。
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -471,19 +513,62 @@
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 加密貨幣策略說明（router_crypto.py）
+ 加密貨幣策略說明（backtest_crypto.py / router_crypto.py）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  策略名稱：VB 波動率收縮突破（Volatility Breakout）
   資料來源：Binance 永續合約（fapi.binance.com）
-  時框：15m K 線 + 4H 趨勢
 
-  收縮條件：ATR(14) < ATR_MA(50) × 0.75，連續 ≥ 20 根
-  突破進場：
-    LONG  → 收盤突破收縮上軌 + 4H EMA20 > EMA50
-    SHORT → 收盤跌破收縮下軌 + 4H EMA20 < EMA50
-  止損：max(收縮下軌, 現價 × 95%)
-  止盈：現價 + 收縮幅 × 1.5
+  ── 4 種策略（回測期 2023-2026，8-9 幣種） ──
+
+  VB  波動率收縮突破（Volatility Breakout）
+  · 時框：1H
+  · 收縮：ATR(14) < ATR_MA(50) × 閾值，連續 ≥ N 根
+  · 進場：收縮結束後收盤突破上軌做多
+
+  3ST 三重 SuperTrend
+  · 時框：4H
+  · 參數：(11,2.0) / (10,1.0) / (12,3.0)
+  · 進場：三條 ST 全部翻多（可設 long_only）
+  · 出場：任一條翻空
+
+  EMA EMA 快慢線交叉 + 趨勢過濾
+  · 時框：4H
+  · 進場：快線（fast EMA）黃金交叉慢線（slow EMA）+ 收盤 > 趨勢線（EMA N）
+  · 止損：固定百分比
+
+  DC  唐奇安通道突破（Donchian Channel）
+  · 時框：4H
+  · 進場：收盤突破 N 根高點
+  · 出場：跌破 M 根低點或止損
+
+  ── Per-coin 最佳化配置（COIN_BEST）──
+
+  各幣種套用回測表現最佳的策略與參數：
+  BTC  → VB  (atr_thresh=0.9,  sq=20, tp=1.0) + 日線EMA200過濾
+  ETH  → 3ST (long_only, sl=8%) + 日線EMA200過濾
+  SOL  → EMA (12/26, trend=200, stop=7%)
+  BNB  → EMA (9/21,  trend=200, stop=5%)
+  XRP  → VB  (atr_thresh=0.8,  sq=10, tp=1.0)
+  AVAX → DC  (entry=10, exit=7, stop=6%)
+  DOGE → EMA (7/21,  trend=100, stop=7%)
+  LINK → VB  (atr_thresh=0.75, sq=15, tp=1.0)
+  ADA  → EMA (9/26,  trend=200, stop=7%)
+
+  日線 EMA200 大趨勢過濾（BTC / ETH 限定）：
+  · 收盤 > 日線 EMA200 → 多頭區間，允許進場
+  · 收盤 < 日線 EMA200 → 空頭區間，暫不進場
+  · 效果：2021-2022 熊市 BTC 從 -35% 改善至 -19%
+
+  ── 回測工具（backtest_crypto.py）──
+
+  執行 4 策略比較：
+    python backtest_crypto.py --mode compare --symbols BTCUSDT ETHUSDT
+
+  執行 Per-coin 最佳化模式：
+    python backtest_crypto.py --mode per-coin
+
+  執行樣本外驗證（2021-2022）：
+    python backtest_crypto.py --start 2021-01-01 --end 2023-01-01 --mode per-coin
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -511,7 +596,7 @@
                            · 包含 OHLCV 近 15 根資料輸出
                            · 包含台股中文名稱查詢（TWSE/TPEX）
                            · 週末自動跳過，不覆蓋平日資料
-  signal_engine.py         三重 SuperTrend 訊號計算邏輯
+  signal_engine.py         三重 SuperTrend 訊號計算邏輯 + 加碼點位計算（calc_add_on_levels）
   scanner_scheduler.py     APScheduler 定時掃描（15:00 台股 / 21:00 美股）
   claude_scanner_analysis.py  Claude 分析輔助函式（排程任務用）
                            · 包含籌碼面資料整合（台股三大法人）
@@ -529,14 +614,19 @@
                              /api/scanner/status          掃描器狀態
                              /api/scanner/trigger         手動觸發掃描
                              /api/scanner/market-state    大盤三重ST狀態（^TWII + ^GSPC + 旺季判斷）
+                             /api/scanner/daily-summary   每日盤後總結（台美股精選 + 市場觀察）
     router_scan_history.py   /api/scan-history            掃描歷史列表
     router_backtest_stock.py /api/backtest/stock          回測（三重 SuperTrend / 結構性回調）
-    router_crypto.py         /api/crypto/signal           加密貨幣 VB 訊號
-                             /api/crypto/ohlcv            K 線資料（15m）
+    router_crypto.py         /api/crypto/signal           VB 訊號（舊，單幣）
+                             /api/crypto/ohlcv            K 線資料（15m，VB 詳細頁用）
+                             /api/crypto/strategy-status  各幣種最佳策略即時狀態（策略訊號 tab）
+                             /api/crypto/strategy-chart   策略 K 線圖資料（含進場標記）
+                             /api/crypto/signals          Per-coin 持倉狀態（停用）
     router_history.py        /api/history                 歷史紀錄
-    router_stock.py          /api/stock                   個股技術分析
+    router_stock.py          /api/stock/{symbol}          個股技術分析
+                             /api/stock/sentiment         StockTwits 社群情緒
     router_sector.py         /api/sector                  板塊掃描
-    router_btc.py            /api/btc                     BTC 分析（舊）
+    router_btc.py            /api/btc/short               BTC 短線交易數據
     router_options.py        /api/options                 選擇權資料
     router_twse.py           /api/twse                    台股即時資料
     router_watchlist.py      /api/watchlist               自選股
@@ -546,15 +636,15 @@
                              /api/sector-flow/tw/history  累計歷史（含連買賣超天數）
                              /api/sector-flow/us          美股 SPDR ETF 相對強弱
 
-  ── 舊版 Streamlit 遺留（勿刪，部分仍被 router 引用）──────────
-  claude_analyzer.py    router_stock.py / router_btc.py 仍有 import
-  stocktwits.py         router_stock.py 仍有 import
-  btc_short.py          router_btc.py 仍有 import
+  ── 舊版 Streamlit 遺留（仍被 router 引用，勿刪）──────────────
+  stocktwits.py         router_stock.py 仍有 import（社群情緒，不含 AI 分析）
+  btc_short.py          router_btc.py 仍有 import（BTC 短線數據）
   backtest.py           router_backtest.py 仍有 import
 
-  ── 完全未使用（舊 Streamlit 入口）────────────────────────────
-  main.py               舊版 Streamlit 入口，目前廢棄
-  claude_compare.py     舊版 Streamlit Claude 比較功能，目前廢棄
+  ※ 2026-09-28 已移除：main.py、claude_compare.py（舊版 Streamlit 入口）、
+     claude_analyzer.py（Gemini 分析模組）。
+     一併移除的 API：/api/stock/analyze、/api/btc/analyze（原本呼叫 Gemini）
+     前端 /analyze 頁面的「Gemini AI 分析」按鈕已同步移除，其餘技術指標顯示功能不受影響
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -578,10 +668,12 @@
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   C:\Users\User\stock-advisor\scan_results\
-    tw_YYYYMMDD.json          台股掃描原始結果（含 OHLCV）
-    us_YYYYMMDD.json          美股掃描原始結果（含 OHLCV）
-    claude_tw_YYYYMMDD.json   台股 Claude 分析結果（含融資融券 + 進場時機評估）
-    claude_us_YYYYMMDD.json   美股 Claude 分析結果（含進場時機評估）
+    tw_YYYYMMDD.json             台股掃描原始結果（含 OHLCV + earnings_soon/earnings_date）
+    us_YYYYMMDD.json             美股掃描原始結果（含 OHLCV + earnings_soon/earnings_date）
+    claude_tw_YYYYMMDD.json      台股 Claude 分析結果（含融資融券 + 進場時機評估）
+    claude_us_YYYYMMDD.json      美股 Claude 分析結果（含進場時機評估）
+    daily_summary_YYYYMMDD.json  每日盤後總結（22:00 自動生成）
+                                 欄位：date / generated / summary（純文字）
 
   C:\Users\User\stock-advisor\intraday_snapshots\
     YYYYMMDD_{市場}_{代號}.json   BUY 訊號當日 5m/15m/30m K 棒快照
@@ -712,6 +804,29 @@
      用於未來驗證「進場當天開盤確認」是否有效。
      回測顯示進場日收紅的 EV 是收黑的 6 倍（+5.04% vs -0.52%），
      累積幾個月的日內數據後可做正式統計驗證。
+
+  Q：訊號追蹤的出場邏輯從什麼時候改變的？
+  A：2026-09-25 改為三重 ST 翻空規則，取代原本的「訊號消失就關倉」。
+     舊邏輯：掃描器隔天看不到該股就關倉（因為掃描器只顯示當天剛翻多的股票）
+     新邏輯：每次掃描後重新計算開倉部位的 green_count，
+     依 ST 翻空 + 跌破進場價的條件決定是否出場，部位可持續多天追蹤
+
+  Q：持倉列表的「⚠️ ST 警戒」是什麼意思？
+  A：目前持倉的三條 ST 中已有一條翻空（green_count = 2），
+     若當日收盤跌破進場價則觸發出場，尚未出場代表目前仍在進場價以上。
+     此時應密切關注，下一條翻空若仍高於進場價則繼續持有。
+
+  Q：掃描結果的「📅 財報近期」是什麼？
+  A：該股票 7 天內有財報公布，hover 可看具體日期。
+     財報前後波動大，即使 ST 翻多也可能是一次性反應，建議謹慎。
+     主要對美股有效（yfinance 財報日覆蓋較完整），台股通常不顯示。
+
+  Q：每日總結沒有出現在掃描頁？
+  A：可能原因：
+     1. 22:00 排程時 Claude Code 未開著
+     2. 台美股分析都尚未完成（prompt 讀不到資料回傳空字串）
+     → 手動觸發：在 Claude Code 說「幫我產生今天的盤後總結」
+     → Claude 會讀取兩市場分析結果並撰寫，儲存後前端自動顯示
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

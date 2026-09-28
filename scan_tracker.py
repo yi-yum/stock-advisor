@@ -15,7 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import yfinance as yf
+
+from json_utils import atomic_write_json
 
 logger = logging.getLogger("scan_tracker")
 
@@ -37,8 +40,7 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(TRACKER_FILE, data, ensure_ascii=False, indent=2)
 
 
 # ── OHLC 快照 ─────────────────────────────────────────────────────────────────
@@ -47,7 +49,7 @@ def _fetch_entry_day_ohlc(symbol: str, market: str) -> Optional[dict]:
     """抓取最近一個交易日的 OHLC，作為進場當天快照"""
     try:
         ticker = symbol if market == "us" else symbol  # TW 符號已含 .TW/.TWO
-        df = yf.download(ticker, period="3d", auto_adjust=True, progress=False)
+        df = yf.Ticker(ticker).history(period="3d", auto_adjust=True)
         if df.empty:
             return None
         row = df.iloc[-1]
@@ -79,8 +81,7 @@ def _save_intraday_snapshot(symbol: str, market: str, date_str: str):
 
     for interval in ("5m", "15m", "30m"):
         try:
-            df = yf.download(symbol, period="2d", interval=interval,
-                             auto_adjust=True, progress=False)
+            df = yf.Ticker(symbol).history(period="2d", interval=interval, auto_adjust=True)
             if df.empty:
                 continue
             # 只保留 date_str 當天的資料
@@ -95,20 +96,50 @@ def _save_intraday_snapshot(symbol: str, market: str, date_str: str):
             for ts, row in day_df.iterrows():
                 bars.append({
                     "time":   ts.strftime("%H:%M"),
-                    "open":   round(float(row["Open"].iloc[0])   if hasattr(row["Open"],   "iloc") else float(row["Open"]),   4),
-                    "high":   round(float(row["High"].iloc[0])   if hasattr(row["High"],   "iloc") else float(row["High"]),   4),
-                    "low":    round(float(row["Low"].iloc[0])    if hasattr(row["Low"],    "iloc") else float(row["Low"]),    4),
-                    "close":  round(float(row["Close"].iloc[0])  if hasattr(row["Close"],  "iloc") else float(row["Close"]),  4),
-                    "volume": int(row["Volume"].iloc[0]) if hasattr(row["Volume"], "iloc") else int(row["Volume"]),
+                    "open":   round(float(row["Open"]),  4),
+                    "high":   round(float(row["High"]),  4),
+                    "low":    round(float(row["Low"]),   4),
+                    "close":  round(float(row["Close"]), 4),
+                    "volume": int(row["Volume"]),
                 })
             snapshot["timeframes"][interval] = bars
             logger.info(f"[Tracker] {symbol} {interval} 快照：{len(bars)} 根")
         except Exception as e:
             logger.warning(f"[Tracker] {symbol} {interval} 抓取失敗: {e}")
 
-    with open(snap_file, "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    atomic_write_json(snap_file, snapshot, ensure_ascii=False, indent=2)
     logger.info(f"[Tracker] 日內快照已存：{snap_file.name}")
+
+
+# ── ST 狀態即時查詢 ───────────────────────────────────────────────────────────
+
+def _get_current_st_state(symbol: str) -> Optional[tuple]:
+    """
+    用 yfinance 取得最新日線，計算三重 ST 的 (green_count, prev_green, close)。
+    失敗時回傳 None（不因資料問題強制出場）。
+    """
+    try:
+        from signal_engine import _supertrend, _ST_PARAMS
+        df = yf.Ticker(symbol).history(period="120d", auto_adjust=True)
+        if df.empty or len(df) < 60:
+            logger.warning(f"[Tracker] {symbol} 資料不足，無法計算 ST 狀態")
+            return None
+        high  = df["High"].values.astype(float)
+        low   = df["Low"].values.astype(float)
+        close = df["Close"].values.astype(float)
+        st_results = [_supertrend(high, low, close, p, m) for p, m in _ST_PARAMS]
+        dirs  = [r[0] for r in st_results]
+        lines = [r[1] for r in st_results]
+        cur_dirs  = [int(d[-1]) for d in dirs]
+        prev_dirs = [int(d[-2]) for d in dirs]
+        green_count = sum(1 for d in cur_dirs  if d == 1)
+        prev_green  = sum(1 for d in prev_dirs if d == 1)
+        # 當日止損：三條 ST 支撐線最高值（最近的防守位）
+        current_sl  = round(max(float(lines[i][-1]) for i in range(3)), 4)
+        return green_count, prev_green, float(close[-1]), current_sl
+    except Exception as e:
+        logger.warning(f"[Tracker] 無法取得 {symbol} ST 狀態: {e}")
+        return None
 
 
 # ── 核心更新邏輯 ───────────────────────────────────────────────────────────────
@@ -146,37 +177,49 @@ def update_tracker(scan_output: dict):
             still_open.append(pos)   # 不同市場不處理
             continue
 
-        sym        = pos["symbol"]
+        sym         = pos["symbol"]
         entry_price = pos["entry_price"]
-        sl          = pos.get("sl")
+        stored_green = pos.get("green_count", 3)  # 上次記錄的 green_count
 
-        if sym in today_map:
-            # 仍在掃描結果中
-            current_result = today_map[sym]
-            current_price  = current_result.get("close", entry_price)
-            pnl_pct        = round((current_price - entry_price) / entry_price * 100, 2)
+        # 即時計算目前 ST 狀態
+        st_state = _get_current_st_state(sym)
+        if st_state is None:
+            # 資料取得失敗：保留部位，不強制出場
+            logger.warning(f"[Tracker] {sym} ST 狀態取得失敗，保留部位")
+            still_open.append(pos)
+            continue
 
-            # 檢查是否跌破止損
-            if sl and current_price < sl:
-                closed_positions.append(_close_position(
-                    pos, current_price, today, "跌破止損"
-                ))
-                logger.info(f"[Tracker] {sym} 跌破止損 {sl}，收盤 {current_price}，PnL {pnl_pct:.1f}%")
-            else:
-                # 更新現況
-                pos["current_price"]  = current_price
-                pos["current_pnl_pct"] = pnl_pct
-                pos["last_updated"]   = today
-                still_open.append(pos)
-        else:
-            # 不在今日掃描結果 → 訊號消失，關倉
-            # 用上次已知收盤價（沒有今日資料就用 last_known）
-            exit_price = pos.get("current_price", entry_price)
-            pnl_pct    = round((exit_price - entry_price) / entry_price * 100, 2)
+        curr_green, _prev_green, current_price, current_sl = st_state
+        pnl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+
+        # ── 出場規則（三重ST翻空邏輯）──────────────────────────
+        # 規則 1：三條全翻空 → 無條件出場
+        if curr_green == 0:
             closed_positions.append(_close_position(
-                pos, exit_price, today, "訊號消失"
+                pos, current_price, today, "三條ST全翻空"
             ))
-            logger.info(f"[Tracker] {sym} 訊號消失，PnL {pnl_pct:.1f}%")
+            logger.info(f"[Tracker] {sym} 三條ST全翻空，PnL {pnl_pct:.1f}%")
+            continue
+
+        # 規則 2：ST 條數減少 且 收盤跌破進場價 → 出場
+        if curr_green < stored_green and current_price < entry_price:
+            flipped = stored_green - curr_green
+            reason = f"第{flipped}條ST翻空，跌破進場價"
+            closed_positions.append(_close_position(
+                pos, current_price, today, reason
+            ))
+            logger.info(f"[Tracker] {sym} {reason}，PnL {pnl_pct:.1f}%")
+            continue
+
+        # 繼續持倉：更新最新狀態
+        pos["green_count"]     = curr_green
+        pos["current_sl"]      = current_sl   # 當日動態止損
+        pos["current_price"]   = current_price
+        pos["current_pnl_pct"] = pnl_pct
+        pos["last_updated"]    = today
+        still_open.append(pos)
+        if curr_green < stored_green:
+            logger.info(f"[Tracker] {sym} ST 減少至 {curr_green}/3，但收盤高於進場價（{current_price:.2f} > {entry_price:.2f}），持倉繼續")
 
     # ── Step 2：加入新的 BUY 部位 ────────────────────────────
     tracked_symbols = {p["symbol"] for p in still_open}
@@ -203,6 +246,10 @@ def update_tracker(scan_output: dict):
             "sl":              r.get("sl"),
             "tp":              r.get("tp"),
             "rr":              r.get("rr"),
+            "add_on_levels":   r.get("add_on_levels", []),
+            # ST 翻空出場追蹤
+            "green_count":     3,
+            "current_sl":      r.get("sl"),  # 進場當天先用 signal_engine 的 sl，後續每日更新
             # 追蹤狀態
             "current_price":   entry,
             "current_pnl_pct": 0.0,
@@ -235,22 +282,23 @@ def _close_position(pos: dict, exit_price: float, exit_date: str, reason: str) -
     holding_days = (exit_dt - entry_dt).days
 
     return {
-        "symbol":       pos["symbol"],
-        "market":       pos.get("market", ""),
-        "sector":       pos.get("sector", ""),
-        "signal":       pos.get("signal"),
-        "signal_label": pos.get("signal_label"),
-        "strategy":     pos.get("strategy", ""),
-        "entry_date":   pos["entry_date"],
-        "entry_price":  entry_price,
-        "exit_date":    exit_date,
-        "exit_price":   exit_price,
-        "pnl_pct":      pnl_pct,
-        "exit_reason":  reason,
-        "holding_days": holding_days,
-        "trend_score":  pos.get("trend_score"),
-        "entry_score":  pos.get("entry_score"),
-        "entry_timing": pos.get("entry_timing"),
+        "symbol":         pos["symbol"],
+        "market":         pos.get("market", ""),
+        "sector":         pos.get("sector", ""),
+        "signal":         pos.get("signal"),
+        "signal_label":   pos.get("signal_label"),
+        "strategy":       pos.get("strategy", ""),
+        "entry_date":     pos["entry_date"],
+        "entry_price":    entry_price,
+        "exit_date":      exit_date,
+        "exit_price":     exit_price,
+        "pnl_pct":        pnl_pct,
+        "exit_reason":    reason,
+        "holding_days":   holding_days,
+        "trend_score":    pos.get("trend_score"),
+        "entry_score":    pos.get("entry_score"),
+        "entry_timing":   pos.get("entry_timing"),
+        "claude_analysis": pos.get("claude_analysis"),
         "sl":              pos.get("sl"),
         "tp":              pos.get("tp"),
         "rr":              pos.get("rr"),
@@ -275,6 +323,25 @@ def update_entry_timing(market: str, timing_map: dict):
     if updated:
         _save(data)
         logger.info(f"[Tracker] 補填 {market.upper()} 進場時機標籤 {updated} 筆")
+
+
+def update_entry_analysis(market: str, analysis_map: dict):
+    """
+    Claude 分析完成後呼叫，補填開放部位的完整分析文字。
+    analysis_map: {symbol: "分析文字"}
+    """
+    data = _load()
+    updated = 0
+    for pos in data["open"]:
+        if pos.get("market") != market:
+            continue
+        sym = pos["symbol"]
+        if sym in analysis_map and analysis_map[sym]:
+            pos["claude_analysis"] = analysis_map[sym]
+            updated += 1
+    if updated:
+        _save(data)
+        logger.info(f"[Tracker] 補填 {market.upper()} Claude 分析文字 {updated} 筆")
 
 
 # ── 查詢介面 ───────────────────────────────────────────────────────────────────

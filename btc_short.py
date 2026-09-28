@@ -547,12 +547,18 @@ def get_btc_short_data(coin: str = "BTC", anchor: str = "week", vwap_length: int
         if stop_short and target_short and stop_short > entry_ref:
             rr_short = safe_round((entry_ref - target_short) / (stop_short - entry_ref), 2)
 
+    # 移除各時框內嵌的原始 DataFrame（僅供上方擺盪點計算用，不可 JSON 序列化）
+    tf_data_out = {
+        tf: ({k: v for k, v in d.items() if k != "df"} if d else d)
+        for tf, d in tf_data.items()
+    }
+
     return {
         "coin":         coin,
         "funding":      funding,
         "oi":           oi,
         "ls_ratio":     ls_ratio,
-        "tf_data":      tf_data,
+        "tf_data":      tf_data_out,
         "vwap_data":    vwap_data,
         "score":        score,
         "signals":      signals,

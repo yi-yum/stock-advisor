@@ -1,7 +1,9 @@
-google-generativeai
 yfinance
 streamlit
 pandas
 numpy
 python-dotenv
 requests
+plotly
+pytz
+anthropic
