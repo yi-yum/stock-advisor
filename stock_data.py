@@ -2,6 +2,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
+try:
+    import streamlit as st
+    _STREAMLIT_AVAILABLE = True
+except ImportError:
+    _STREAMLIT_AVAILABLE = False
+
 CRYPTO_SYMBOLS = {
     "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX",
     "DOT", "MATIC", "LINK", "UNI", "LTC", "ATOM", "FIL", "SUI",
@@ -58,6 +64,32 @@ def calculate_atr(df, period=14):
         (df["Low"]  - df["Close"].shift()).abs(),
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
+
+
+def calculate_adx(df, period=14):
+    high  = df["High"]
+    low   = df["Low"]
+    close = df["Close"]
+
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low  - close.shift()).abs()
+    tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up   = high.diff()
+    down = -low.diff()
+    dm_plus  = up.where((up > down) & (up > 0), 0.0)
+    dm_minus = down.where((down > up) & (down > 0), 0.0)
+
+    atr_s     = tr.ewm(span=period, adjust=False).mean()
+    di_plus   = 100 * dm_plus.ewm(span=period, adjust=False).mean()  / atr_s
+    di_minus  = 100 * dm_minus.ewm(span=period, adjust=False).mean() / atr_s
+
+    denom = (di_plus + di_minus).replace(0, float("nan"))
+    dx    = 100 * (di_plus - di_minus).abs() / denom
+    adx   = dx.ewm(span=period, adjust=False).mean()
+
+    return adx, di_plus, di_minus
 
 
 def calculate_obv(df):
@@ -255,6 +287,12 @@ def resample_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
 
 # ── 主函式 ───────────────────────────────────────────
 
+def _cache_if_streamlit(fn):
+    if _STREAMLIT_AVAILABLE:
+        return st.cache_data(ttl=600)(fn)
+    return fn
+
+@_cache_if_streamlit
 def get_stock_data(symbol: str):
     try:
         symbol = symbol.upper()
@@ -287,6 +325,9 @@ def get_stock_data(symbol: str):
 
         # ATR
         df_d["ATR"] = calculate_atr(df_d)
+
+        # ADX
+        df_d["ADX"], df_d["DI_plus"], df_d["DI_minus"] = calculate_adx(df_d)
 
         # OBV
         df_d["OBV"] = calculate_obv(df_d)
@@ -401,6 +442,9 @@ def get_stock_data(symbol: str):
             "atr":         atr,
             "atr_pct":     atr_pct,
             "atr_stop":    atr_stop,
+            "adx":         safe_round(latest["ADX"], 1),
+            "di_plus":     safe_round(latest["DI_plus"], 1),
+            "di_minus":    safe_round(latest["DI_minus"], 1),
             "obv_signal":  obv_signal,
             "rsi_divergence": rsi_divergence,
             "earnings_info":  earnings_info,

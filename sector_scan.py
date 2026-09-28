@@ -3,15 +3,20 @@ import pandas as pd
 from stock_data import calculate_rsi, calculate_macd, detect_rsi_divergence, detect_candlestick_patterns, safe_round
 
 SECTOR_STOCKS = {
-    "半導體":     ["NVDA", "AMD", "AVGO", "QCOM", "AMAT", "MU", "TXN", "LRCX"],
-    "軟體/SaaS":  ["MSFT", "ORCL", "CRM", "ADBE", "NOW", "INTU"],
-    "通訊/社群":  ["GOOGL", "META", "NFLX", "DIS"],
-    "電商/消費":  ["AMZN", "TSLA", "NKE", "MCD"],
-    "金融":       ["JPM", "BAC", "GS", "V", "MA", "BRK-B"],
-    "醫療/生技":  ["JNJ", "UNH", "LLY", "ABBV", "MRK", "PFE"],
-    "能源":       ["XOM", "CVX", "COP", "SLB"],
-    "工業":       ["CAT", "DE", "HON", "GE", "RTX"],
-    "防禦/公用":  ["WMT", "COST", "PG", "NEE", "DUK"],
+    "科技龍頭":   ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "IBM", "ORCL", "DELL", "HPQ"],
+    "半導體":     ["AMD", "AVGO", "QCOM", "AMAT", "MU", "TXN", "TSM", "ARM", "MRVL", "SMCI", "LRCX", "KLAC", "NXPI", "ON"],
+    "軟體/SaaS":  ["CRM", "ADBE", "NOW", "INTU", "PLTR", "CRWD", "SNOW", "DDOG", "PANW", "ZS", "WDAY", "VEEV", "HUBS", "SHOP", "TEAM"],
+    "通訊/娛樂":  ["NFLX", "DIS", "CMCSA", "SPOT"],
+    "平台經濟":   ["UBER", "ABNB", "DASH"],
+    "電商/消費":  ["AMZN", "TSLA", "NKE", "MCD", "SBUX", "COST", "HD", "TGT", "LULU"],
+    "金融":       ["JPM", "BAC", "GS", "V", "MA", "MS", "PYPL", "BRK-B", "WFC", "C", "AXP", "BLK", "SCHW", "COF"],
+    "醫療/生技":  ["JNJ", "UNH", "LLY", "ABBV", "MRK", "PFE", "GILD", "VRTX", "REGN", "AMGN", "BMY", "BIIB", "ISRG", "MDT", "BSX", "CVS", "CI"],
+    "能源":       ["XOM", "CVX", "COP", "OXY", "SLB"],
+    "工業/航太":  ["CAT", "DE", "HON", "GE", "RTX", "LMT", "BA", "MMM"],
+    "防禦/公用":  ["WMT", "PG", "KO", "PEP", "NEE", "SO", "DUK"],
+    "材料":       ["FCX", "NEM", "CF", "MOS"],
+    "REITs":      ["AMT", "PLD", "O"],
+    "加密概念":   ["MSTR", "COIN", "HOOD"],
 }
 
 
