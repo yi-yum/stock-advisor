@@ -37,7 +37,7 @@ def load(mk):
     return O.where(O > 0), pd.DataFrame(c).reindex(O.index).where(lambda x: x > 0), pd.DataFrame(v).reindex(O.index)
 
 
-def run(O, C, ADV_rank, L_months, top, liq, fb, fs):
+def run(O, C, ADV_rank, L_months, top, liq, fb, fs, hist=None, bottom=False):
     ov, cv = O.values, C.values
     n, m = ov.shape
     with np.errstate(all="ignore"):
@@ -60,7 +60,10 @@ def run(O, C, ADV_rank, L_months, top, liq, fb, fs):
         cand = np.flatnonzero(ok)
         if len(cand) < 30:
             continue
-        sel = cand[np.argsort(-score[cand])[: max(10, int(len(cand) * top))]]
+        order = np.argsort(score[cand]) if bottom else np.argsort(-score[cand])
+        sel = cand[order[: max(10, int(len(cand) * top))]]
+        if hist is not None:
+            hist.append((e, e2, sel))
         w = np.zeros(m); w[sel] = 1 / len(sel)
         buy = np.clip(w - prev_w, 0, None).sum(); sell = np.clip(prev_w - w, 0, None).sum()
         turn.append(buy)
