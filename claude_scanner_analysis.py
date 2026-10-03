@@ -29,13 +29,17 @@ def build_backtest_stats(market: str = "tw") -> dict:
     """
     從回測 CSV 計算每支股票的歷史三重ST訊號統計。
     回傳 {symbol: {n, win_rate, avg_win, avg_loss, avg_days, ev}} 。
+
+    只採用未加大盤/季節過濾條件的完整版本（樣本數才夠大、統計才穩定）；
+    美股若同時存在 sp500 全成分股版與舊版窄清單版，優先用涵蓋範圍較大的
+    sp500 版；同版本有多個日期時取最新一份。
     """
     pattern = f"signals_{market}_*.csv"
-    files = sorted(BACKTEST_STATS_DIR.glob(pattern), reverse=True)
-    # 優先用未加過濾條件的完整版（檔名最短）
-    files = [f for f in files if "_taiex" not in f.stem and "_season" not in f.stem]
+    files = list(BACKTEST_STATS_DIR.glob(pattern))
+    files = [f for f in files if not any(tag in f.stem for tag in ("_taiex", "_gspc", "_season"))]
     if not files:
         return {}
+    files.sort(key=lambda f: ("_sp500" in f.stem, f.name), reverse=True)
     try:
         df = pd.read_csv(files[0])
     except Exception as e:

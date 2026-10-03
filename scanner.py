@@ -53,7 +53,8 @@ SCAN_CHARTS_DIR = Path(__file__).parent / "scan_charts"
 SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SCAN_CHARTS_DIR.mkdir(parents=True, exist_ok=True)
 
-US_SYMBOLS_BY_SECTOR = {
+# 備援清單：S&P500 清單抓取失敗時才使用（正常情況下 run_us_scan() 會動態抓 S&P500 全成分股）
+US_FALLBACK_SYMBOLS_BY_SECTOR = {
     "科技":     ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "IBM", "ORCL", "DELL", "HPQ"],
     "半導體":   ["AMD", "AVGO", "QCOM", "AMAT", "MU", "TXN", "TSM", "ARM", "MRVL", "SMCI", "LRCX", "KLAC", "NXPI", "ON"],
     "軟體":     ["CRM", "ADBE", "NOW", "INTU", "PLTR", "CRWD", "SNOW", "DDOG", "PANW", "ZS", "WDAY", "VEEV", "HUBS", "SHOP", "TEAM"],
@@ -70,8 +71,50 @@ US_SYMBOLS_BY_SECTOR = {
     "加密概念": ["MSTR", "COIN", "HOOD"],
     "航太":     ["SPCX"],
 }
-US_SYMBOLS = [s for group in US_SYMBOLS_BY_SECTOR.values() for s in group]
-US_SYMBOL_SECTOR = {s: sec for sec, syms in US_SYMBOLS_BY_SECTOR.items() for s in syms}
+US_SYMBOLS = [s for group in US_FALLBACK_SYMBOLS_BY_SECTOR.values() for s in group]
+US_SYMBOL_SECTOR = {s: sec for sec, syms in US_FALLBACK_SYMBOLS_BY_SECTOR.items() for s in syms}
+
+# GICS 11 大產業英文 → 中文（與 us_sector_flow.py 的 SPDR 板塊命名一致）
+_GICS_SECTOR_ZH = {
+    "Information Technology": "科技",
+    "Financials":             "金融",
+    "Energy":                 "能源",
+    "Health Care":             "醫療保健",
+    "Industrials":            "工業",
+    "Consumer Discretionary": "非必需消費",
+    "Consumer Staples":       "必需消費",
+    "Utilities":              "公用事業",
+    "Real Estate":            "房地產",
+    "Communication Services": "通信服務",
+    "Materials":              "原材料",
+}
+
+
+def get_sp500_symbols_with_sector() -> tuple[list[str], dict[str, str]]:
+    """
+    從 Wikipedia 抓取 S&P500 全成分股（~503支）與 GICS 產業分類。
+    失敗時退回 US_SYMBOLS / US_SYMBOL_SECTOR 備援清單（114支手選大型股）。
+    """
+    try:
+        import pandas as pd  # noqa: F401（已於檔案頂部匯入，這裡僅明確依賴）
+        from io import StringIO
+        resp = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        df = pd.read_html(StringIO(resp.text))[0]
+        symbols = [s.replace(".", "-") for s in df["Symbol"].tolist()]
+        sector_map = {
+            s.replace(".", "-"): _GICS_SECTOR_ZH.get(g, g)
+            for s, g in zip(df["Symbol"], df["GICS Sector"])
+        }
+        logger.info(f"S&P500 清單取得：{len(symbols)} 支")
+        return symbols, sector_map
+    except Exception as e:
+        logger.warning(f"S&P500 清單抓取失敗（{e}），改用備援清單（{len(US_SYMBOLS)} 支）")
+        return US_SYMBOLS, US_SYMBOL_SECTOR
 
 
 def get_twse_symbols() -> list:
@@ -412,7 +455,7 @@ async def run_tw_scan() -> dict:
 
 
 async def run_us_scan() -> dict:
-    """執行美股固定清單掃描。"""
+    """執行美股掃描（S&P500 全成分股，動態抓取；失敗時退回備援清單）。"""
     scan_time = datetime.now().isoformat()
     if datetime.now().weekday() >= 5:
         logger.info("今日為週末，跳過美股掃描")
@@ -420,9 +463,22 @@ async def run_us_scan() -> dict:
                 "message": "週末不進行掃描", "results": []}
     logger.info("開始美股掃描...")
 
-    all_data = await asyncio.get_running_loop().run_in_executor(
-        None, lambda: _fetch_batch_sync(US_SYMBOLS, "6mo")
+    us_symbols, us_symbol_sector = await asyncio.get_running_loop().run_in_executor(
+        None, get_sp500_symbols_with_sector
     )
+
+    # 分批下載（與台股掃描同樣每批100支+間隔2秒），避免 S&P500 全量一次請求觸發 yfinance 限流
+    all_data = {}
+    batch_size = 100
+    for i in range(0, len(us_symbols), batch_size):
+        batch = us_symbols[i: i + batch_size]
+        logger.info(f"美股下載 {i + 1}~{i + len(batch)} / {len(us_symbols)}")
+        batch_data = await asyncio.get_running_loop().run_in_executor(
+            None, lambda b=batch: _fetch_batch_sync(b, "6mo")
+        )
+        all_data.update(batch_data)
+        await asyncio.sleep(2)
+
     logger.info(f"美股成功下載 {len(all_data)} 支")
 
     # 美股快篩：套用美股流動性門檻，只保留 BUY / WATCH
@@ -430,7 +486,7 @@ async def run_us_scan() -> dict:
     for sym, df in all_data.items():
         hit = technical_prescreen(sym, df, min_avg_vol=MIN_AVG_VOL_US, min_price=MIN_PRICE_US)
         if hit:
-            hit["sector"] = US_SYMBOL_SECTOR.get(sym, "其他")
+            hit["sector"] = us_symbol_sector.get(sym, "其他")
             hit["name"] = sym
             candidates_us.append((sym, df, hit))
 
@@ -440,7 +496,7 @@ async def run_us_scan() -> dict:
 
     async def analyze_one_us(sym, df, prescreen):
         async with semaphore:
-            prescreen["sector"] = US_SYMBOL_SECTOR.get(sym, "其他")
+            prescreen["sector"] = us_symbol_sector.get(sym, "其他")
             prescreen["name"] = sym
             chart_path = await asyncio.get_running_loop().run_in_executor(
                 None, lambda s=sym, d=df: generate_chart_image(s, d)
@@ -459,7 +515,7 @@ async def run_us_scan() -> dict:
     output = {
         "market": "us",
         "scan_time": scan_time,
-        "total_scanned": len(US_SYMBOLS),
+        "total_scanned": len(us_symbols),
         "pre_screened": len(candidates_us),
         "analyzed": len(results),
         "results": results,
