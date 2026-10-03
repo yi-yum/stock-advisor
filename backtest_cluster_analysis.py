@@ -177,23 +177,30 @@ def main():
     pat = "signals_tw_2*.csv" if mk == "tw" else "signals_us_sp500_2*.csv"
     f = sorted(RESULT_DIR.glob(pat))[-1]
     tr = pd.read_csv(f)
-    print(f"[交易] {f.name}：{len(tr)} 筆，{tr.symbol.nunique()} 檔，訊號日 {tr.signal_date.nunique()} 個")
+    print(f"[交易] {f.name}：{len(tr)} 筆，{tr.symbol.nunique()} 檔")
 
     openm = load_universe_open(mk)
+    # 注意：回測 CSV 的 signal_date 在 97% 的交易中是「出場」訊號日（backtest_portfolio.py 在出場分支寫入），
+    # 不是進場訊號日。進場訊號為收盤確認、次日開盤成交，故進場訊號日 = 進場日的前一個交易日。
+    dl = [d.strftime("%Y-%m-%d") for d in openm.index]
+    prev = {dl[i]: dl[i - 1] for i in range(1, len(dl))}
+    tr["sig_entry"] = tr["entry_date"].map(prev)
+    tr = tr.dropna(subset=["sig_entry"]).copy()
+    print(f"[交易] 進場訊號日 {tr.sig_entry.nunique()} 個")
     fee_rt = (TW_FEE_BUY + TW_FEE_SELL) if mk == "tw" else 0.0
     tr["base"] = baseline_returns(tr, openm, fee_rt)
     tr = tr.dropna(subset=["base", "return_pct"]).copy()
     tr["excess"] = tr["return_pct"] - tr["base"]
-    tr["month"] = pd.to_datetime(tr["signal_date"]).dt.to_period("M").astype(str)
-    tr["week"]  = pd.to_datetime(tr["signal_date"]).dt.to_period("W").astype(str)
-    tr["green"] = market_green(tr["signal_date"], mk, "2021-01-01", "2026-09-22")
+    tr["month"] = pd.to_datetime(tr["sig_entry"]).dt.to_period("M").astype(str)
+    tr["week"]  = pd.to_datetime(tr["sig_entry"]).dt.to_period("W").astype(str)
+    tr["green"] = market_green(tr["sig_entry"], mk, "2021-01-01", "2026-09-22")
     tr["season"] = tr["entry_month"].isin(SEASON_MONTHS)
     print(f"[基準] 可計算基準的交易：{len(tr)} 筆；基準平均 {tr.base.mean():+.2f}%（持有期全市場平均）\n")
 
     print("=== A. 整體：原始報酬 vs 超額報酬（分群方式不同，區間寬度不同）===")
     for label, col in (("原始報酬", "return_pct"), ("超額報酬(扣全市場基準)", "excess")):
         print(f"-- {label}")
-        for gname, gcol in (("訊號日分群", "signal_date"), ("週分群", "week"), ("月分群(最保守)", "month")):
+        for gname, gcol in (("進場訊號日分群", "sig_entry"), ("週分群", "week"), ("月分群(最保守)", "month")):
             print(f"  {gname:<12}", fmt(cluster_stats(tr[col].values, tr[gcol])))
     print(f"\n  交易的勝率：{(tr.return_pct > 0).mean()*100:.1f}%；基準(全市場買入持有)有 "
           f"{(tr.base > 0).mean()*100:.1f}% 的持有期為正\n")
@@ -228,7 +235,7 @@ def main():
             print(f"  {name:<20} {lab}差 {p:+6.2f}%  95%CI[{lo:+6.2f}, {hi:+6.2f}]  p≈{pv:.3f}")
 
     print("\n=== E. 訊號集中度 ===")
-    per_day = tr.groupby("signal_date").size()
+    per_day = tr.groupby("sig_entry").size()
     print(f"  每個訊號日平均 {per_day.mean():.1f} 筆、最多 {per_day.max()} 筆；"
           f"前 5% 的訊號日佔了 {per_day.sort_values(ascending=False).head(max(1, int(len(per_day)*.05))).sum()/len(tr)*100:.0f}% 的交易")
 

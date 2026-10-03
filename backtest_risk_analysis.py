@@ -131,7 +131,7 @@ def main():
         cret = (oa[ix, cols] / oa[ie, cols] - 1 - fee_rt) * 100
         if not np.isfinite(mae[0]) or not np.isfinite(mae[1:]).all():
             continue
-        rec.append((r.signal_date, r.return_pct, mae[0] * 100, cret, mae[1:] * 100))
+        rec.append((r.entry_date, r.return_pct, mae[0] * 100, cret, mae[1:] * 100))
     sig = pd.Series([x[0] for x in rec])
     month = pd.to_datetime(sig).dt.to_period("M").astype(str)
     s_ret = np.array([x[1] for x in rec]); s_mae = np.array([x[2] for x in rec])
