@@ -5,6 +5,9 @@ import sys
 import math
 import json
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import pandas as pd
 import numpy as np
@@ -38,8 +41,20 @@ LINE_API_PUSH       = "https://api.line.me/v2/bot/message/push"
 
 # ── 工具函式 ────────────────────────────────────────────────────────────────────
 
+_KLINE_CACHE: dict = {}
+_KLINE_CACHE_LOCK = threading.Lock()
+KLINE_CACHE_TTL = 60  # 秒；每小時排程與網頁同時請求時，避免重複打 Binance 被限流
+
+
 def _fetch_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    """呼叫 Binance 公開 K 線 API，回傳 DataFrame。"""
+    """呼叫 Binance 公開 K 線 API，回傳 DataFrame（60 秒內相同請求走快取）。"""
+    key = (symbol, interval, limit)
+    now = time.time()
+    with _KLINE_CACHE_LOCK:
+        hit = _KLINE_CACHE.get(key)
+        if hit and now - hit[0] < KLINE_CACHE_TTL:
+            return hit[1].copy()
+
     url = f"{BINANCE_BASE}?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         resp = requests.get(url, timeout=10)
@@ -60,7 +75,10 @@ def _fetch_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["open_time"] = pd.to_numeric(df["open_time"])
     df = df.sort_values("open_time").reset_index(drop=True)
-    return df
+
+    with _KLINE_CACHE_LOCK:
+        _KLINE_CACHE[key] = (now, df)
+    return df.copy()
 
 
 def _round_price(v):
@@ -374,14 +392,19 @@ def _strategy_status_3st(symbol: str, cfg: dict, bull_mask_val: bool | None) -> 
     h = df["high"].values
     lo = df["low"].values
     c  = df["close"].values
-    o  = df["open"].values
 
-    dirs = [int(_supertrend(h, lo, c, p, m)[0][-1]) for p, m in ST_PARAMS]
-    prev_dirs = [int(_supertrend(h, lo, c, p, m)[0][-2]) for p, m in ST_PARAMS]
+    # 最後一根 4H 是尚未收盤的 K 棒，ST 方向會在收盤前來回翻動（訊號閃現又消失，
+    # 會造成假進場通知）。訊號改用最近一根「已收盤」K 棒判斷，與回測一致；
+    # price 仍取即時價供顯示。
+    price = float(c[-1])
+    h, lo, c = h[:-1], lo[:-1], c[:-1]
+
+    st_results = [_supertrend(h, lo, c, p, m)[0] for p, m in ST_PARAMS]
+    dirs      = [int(d[-1]) for d in st_results]
+    prev_dirs = [int(d[-2]) for d in st_results]
 
     green      = sum(1 for d in dirs if d == 1)
     prev_green = sum(1 for d in prev_dirs if d == 1)
-    price      = float(c[-1])
 
     just_entry = (green == 3 and prev_green < 3)
     just_exit  = (prev_green == 3 and green < 3)
@@ -427,8 +450,9 @@ def _strategy_status_ema(symbol: str, cfg: dict, bull_mask_val: bool | None) -> 
     warmup = trend + 10
     df = _fetch_klines(symbol, "4h", warmup + 50)
     c  = df["close"].astype(float).values
-    o  = df["open"].astype(float).values
+    # 最後一根 4H 尚未收盤，交叉/趨勢判斷改用已收盤 K 棒（避免假訊號），price 取即時價
     price = float(c[-1])
+    c = c[:-1]
 
     ema_f = pd.Series(c).ewm(span=fast,  adjust=False).mean().values
     ema_s = pd.Series(c).ewm(span=slow,  adjust=False).mean().values
@@ -547,8 +571,8 @@ def get_strategy_status():
         except Exception:
             return None
 
-    results = []
-    for symbol, cfg in COIN_BEST.items():
+    def _one(item):
+        symbol, cfg = item
         strat = cfg["strategy"]
         bull  = _macro_bull(symbol) if cfg.get("trend_filter") else None
         try:
@@ -564,13 +588,11 @@ def get_strategy_status():
                 s = {"signal": "WAIT", "can_enter": False, "reason": f"未知策略 {strat}", "price": None}
         except Exception as e:
             s = {"signal": "WAIT", "can_enter": False, "reason": f"錯誤：{e}", "price": None}
+        return {"symbol": symbol, "strategy": strat, "macro_bull": bull, **s}
 
-        results.append({
-            "symbol":     symbol,
-            "strategy":   strat,
-            "macro_bull": bull,
-            **s,
-        })
+    # 9 個幣種平行抓取（原本逐一依序呼叫 Binance，頁面載入很慢）；map 保持 COIN_BEST 的順序
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        results = list(pool.map(_one, COIN_BEST.items()))
 
     return {
         "signals":    results,
@@ -851,8 +873,8 @@ def get_signal_history():
 @router.get("/notify")
 def check_and_notify():
     """
-    檢查各幣種訊號是否有新進場/出場，有則寫入歷史並發送 LINE 推播。
-    由 APScheduler 每 4 小時自動呼叫，也可手動觸發。
+    檢查各幣種訊號是否有新進場/出場，有則寫入歷史、更新持倉追蹤（crypto_tracker）
+    並發送 LINE 推播。由 APScheduler 每小時自動呼叫，也可手動觸發。
 
     LINE Messaging API 設定（.env）：
       LINE_CHANNEL_TOKEN=<長效 Channel Access Token>
@@ -906,6 +928,15 @@ def check_and_notify():
         "history": history[-500:],
     }, ensure_ascii=False, indent=2)
 
+    # ── 持倉追蹤（不論有沒有設定 LINE 都要記錄）──────────────────────────────
+    tracker_result = {}
+    try:
+        from backtest_crypto import COIN_BEST
+        from crypto_tracker import update_tracker
+        tracker_result = update_tracker(alerts, current_map, now_str, COIN_BEST)
+    except Exception as e:
+        tracker_result = {"error": str(e)}
+
     # ── LINE 推播 ─────────────────────────────────────────────────────────────
     line_results = []
     if channel_token and user_id and alerts:
@@ -940,7 +971,15 @@ def check_and_notify():
         "symbols_alerted":  [a["symbol"] for a in alerts],
         "line_configured":  bool(channel_token and user_id),
         "line_results":     line_results,
+        "tracker":          tracker_result,
     }
+
+
+@router.get("/tracker")
+def get_crypto_tracker(limit: int = Query(100, ge=1, le=500)):
+    """加密貨幣持倉追蹤：目前持倉、已平倉紀錄、整體與分策略/分幣種績效。"""
+    from crypto_tracker import get_tracker
+    return get_tracker(limit)
 
 
 # ── Per-coin 持倉狀態（回測式，已停用於 dashboard）──────────────────────────

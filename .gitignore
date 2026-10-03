@@ -9,6 +9,7 @@ history.db
 alerts.json
 watchlist.json
 scan_tracker.json
+crypto_tracker.json
 
 # 掃描/回測/籌碼快取與產出（可重新產生，不上傳）
 scan_results/
@@ -19,8 +20,9 @@ intraday_snapshots/
 sector_flow_data/
 
 # Claude Code cron 產生的暫存檔
-_tmp_*.txt
-_save_analyses*.py
+_tmp_*
+_save_*.py
+_analyses*.json
 
 # Claude Code 本機工具狀態
 .claude/
