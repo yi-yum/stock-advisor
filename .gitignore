@@ -37,3 +37,6 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# 資料遷移備份
+*.bak_*

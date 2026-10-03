@@ -19,8 +19,48 @@ import numpy as np
 import yfinance as yf
 
 from json_utils import atomic_write_json
+from signal_engine import calc_add_on_levels
 
 logger = logging.getLogger("scan_tracker")
+
+# 來回交易成本（買+賣）：台股 手續費 0.1425%×2 + 證交稅 0.3% = 0.585%；
+# 美股沿用回測頁的保守估計（單邊 0.05%）。所有損益（含未實現）皆已扣除，
+# 未實現部分視為「若現在出場」的淨損益。
+ROUND_TRIP_FEE = {"tw": 0.00585, "us": 0.001}
+
+
+def _net_pnl_pct(entry: float, price: float, market: str) -> float:
+    fee = ROUND_TRIP_FEE.get(market, 0.0)
+    return round(((price - entry) / entry - fee) * 100, 2)
+
+
+def _try_fill_entry(pos: dict) -> bool:
+    """
+    策略設計為「訊號日收盤確認 → 次日開盤買進」。新部位先以訊號日收盤價暫記
+    （entry_pending=True、不計入績效），等訊號日之後第一根日 K 出來，改用其開盤價
+    作為實際進場價，並依新進場價重算加碼點位。資料尚未出現則維持待進場。
+    """
+    try:
+        df = yf.Ticker(pos["symbol"]).history(period="30d", auto_adjust=True)
+        if df.empty:
+            return False
+        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+        sig_date = pos.get("signal_bar_date") or pos["entry_date"]
+        later = df[df.index.strftime("%Y-%m-%d") > sig_date]
+        if later.empty:
+            return False
+        open_px = float(later.iloc[0]["Open"])
+        if not open_px > 0:
+            return False
+        pos["signal_price"]    = pos.get("signal_price", pos["entry_price"])
+        pos["entry_price"]     = round(open_px, 4)
+        pos["entry_fill_date"] = later.index[0].strftime("%Y-%m-%d")
+        pos["entry_pending"]   = False
+        pos["add_on_levels"]   = calc_add_on_levels(pos["entry_price"], pos.get("sl"))
+        return True
+    except Exception as e:
+        logger.warning(f"[Tracker] {pos['symbol']} 取得進場開盤價失敗: {e}")
+        return False
 
 TRACKER_FILE      = Path(__file__).parent / "scan_tracker.json"
 INTRADAY_SNAP_DIR = Path(__file__).parent / "intraday_snapshots"
@@ -136,10 +176,41 @@ def _get_current_st_state(symbol: str) -> Optional[tuple]:
         prev_green  = sum(1 for d in prev_dirs if d == 1)
         # 當日止損：三條 ST 支撐線最高值（最近的防守位）
         current_sl  = round(max(float(lines[i][-1]) for i in range(3)), 4)
-        return green_count, prev_green, float(close[-1]), current_sl
+        return green_count, prev_green, float(close[-1]), current_sl, df.index[-1].strftime("%Y-%m-%d")
     except Exception as e:
         logger.warning(f"[Tracker] 無法取得 {symbol} ST 狀態: {e}")
         return None
+
+
+def _next_bar_open(symbol: str, after_date: str):
+    """回傳 (開盤價, 日期)：after_date 之後第一根日 K 的開盤價；尚無資料則 None。"""
+    try:
+        df = yf.Ticker(symbol).history(period="30d", auto_adjust=True)
+        if df.empty:
+            return None
+        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+        later = df[df.index.strftime("%Y-%m-%d") > after_date]
+        if later.empty:
+            return None
+        px = float(later.iloc[0]["Open"])
+        if not px > 0:
+            return None
+        return px, later.index[0].strftime("%Y-%m-%d")
+    except Exception as e:
+        logger.warning(f"[Tracker] {symbol} 取得開盤價失敗: {e}")
+        return None
+
+
+def _try_fill_exit(pos: dict):
+    """
+    出場同樣是「訊號日收盤確認 → 次日開盤賣出」。出場訊號成立當天只標記
+    exit_pending，等訊號日之後第一根日 K 的開盤價出現才平倉。回傳平倉紀錄或 None。
+    """
+    fill = _next_bar_open(pos["symbol"], pos["exit_signal_bar_date"])
+    if fill is None:
+        return None
+    px, fill_date = fill
+    return _close_position(pos, round(px, 4), fill_date, pos["exit_pending_reason"])
 
 
 # ── 核心更新邏輯 ───────────────────────────────────────────────────────────────
@@ -177,7 +248,18 @@ def update_tracker(scan_output: dict):
             still_open.append(pos)   # 不同市場不處理
             continue
 
-        sym         = pos["symbol"]
+        sym = pos["symbol"]
+        if pos.get("entry_pending") and not _try_fill_entry(pos):
+            still_open.append(pos)   # 開盤價尚未出現：維持待進場，不評估出場
+            continue
+        if pos.get("exit_pending"):
+            rec = _try_fill_exit(pos)
+            if rec is None:
+                still_open.append(pos)   # 出場開盤價尚未出現：續掛待出場
+            else:
+                closed_positions.append(rec)
+                logger.info(f"[Tracker] {sym} 次日開盤出場 {rec['exit_price']}，PnL {rec['pnl_pct']:.1f}%")
+            continue
         entry_price = pos["entry_price"]
         stored_green = pos.get("green_count", 3)  # 上次記錄的 green_count
 
@@ -189,26 +271,32 @@ def update_tracker(scan_output: dict):
             still_open.append(pos)
             continue
 
-        curr_green, _prev_green, current_price, current_sl = st_state
-        pnl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+        curr_green, _prev_green, current_price, current_sl, bar_date = st_state
+        pnl_pct = _net_pnl_pct(entry_price, current_price, market)
 
         # ── 出場規則（三重ST翻空邏輯）──────────────────────────
         # 規則 1：三條全翻空 → 無條件出場
         if curr_green == 0:
-            closed_positions.append(_close_position(
-                pos, current_price, today, "三條ST全翻空"
-            ))
-            logger.info(f"[Tracker] {sym} 三條ST全翻空，PnL {pnl_pct:.1f}%")
+            _mark_exit_pending(pos, "三條ST全翻空", current_price, bar_date, pnl_pct)
+            rec = _try_fill_exit(pos)
+            if rec is None:
+                still_open.append(pos)
+            else:
+                closed_positions.append(rec)
+            logger.info(f"[Tracker] {sym} 三條ST全翻空（收盤確認，次日開盤出場），PnL {pnl_pct:.1f}%")
             continue
 
         # 規則 2：ST 條數減少 且 收盤跌破進場價 → 出場
         if curr_green < stored_green and current_price < entry_price:
             flipped = stored_green - curr_green
             reason = f"第{flipped}條ST翻空，跌破進場價"
-            closed_positions.append(_close_position(
-                pos, current_price, today, reason
-            ))
-            logger.info(f"[Tracker] {sym} {reason}，PnL {pnl_pct:.1f}%")
+            _mark_exit_pending(pos, reason, current_price, bar_date, pnl_pct)
+            rec = _try_fill_exit(pos)
+            if rec is None:
+                still_open.append(pos)
+            else:
+                closed_positions.append(rec)
+            logger.info(f"[Tracker] {sym} {reason}（收盤確認，次日開盤出場），PnL {pnl_pct:.1f}%")
             continue
 
         # 繼續持倉：更新最新狀態
@@ -230,13 +318,18 @@ def update_tracker(scan_output: dict):
 
         r     = today_map[sym]
         entry = r.get("close", 0)
+        ohlcv = r.get("ohlcv") or []
+        signal_bar_date = ohlcv[-1].get("date", today) if ohlcv else today
 
         new_pos = {
             "symbol":          sym,
             "market":          market,
             "sector":          r.get("sector", ""),
             "entry_date":      today,
-            "entry_price":     entry,
+            "entry_price":     entry,           # 暫記訊號日收盤；次日開盤價出現後改寫
+            "signal_price":    entry,
+            "signal_bar_date": signal_bar_date,
+            "entry_pending":   True,
             "signal":          r.get("signal"),
             "signal_label":    r.get("signal_label"),
             "strategy":        r.get("strategy", ""),
@@ -252,7 +345,7 @@ def update_tracker(scan_output: dict):
             "current_sl":      r.get("sl"),  # 進場當天先用 signal_engine 的 sl，後續每日更新
             # 追蹤狀態
             "current_price":   entry,
-            "current_pnl_pct": 0.0,
+            "current_pnl_pct": None,   # 待進場：不計入績效
             "last_updated":    today,
             # 進場時機（Claude 分析後補填）
             "entry_timing":    None,
@@ -274,9 +367,21 @@ def update_tracker(scan_output: dict):
     )
 
 
+def _mark_exit_pending(pos: dict, reason: str, signal_price: float, bar_date: str, pnl_pct: float) -> None:
+    pos["exit_pending"]          = True
+    pos["exit_pending_reason"]   = reason
+    pos["exit_signal_bar_date"]  = bar_date
+    pos["exit_signal_price"]     = signal_price
+    pos["current_price"]         = signal_price
+    pos["current_pnl_pct"]       = pnl_pct   # 以訊號日收盤暫估（扣成本），實際以次日開盤成交為準
+    pos["last_updated"]          = bar_date
+
+
 def _close_position(pos: dict, exit_price: float, exit_date: str, reason: str) -> dict:
     entry_price  = pos["entry_price"]
-    pnl_pct      = round((exit_price - entry_price) / entry_price * 100, 2)
+    market       = pos.get("market", "")
+    gross_pct    = round((exit_price - entry_price) / entry_price * 100, 2)
+    pnl_pct      = _net_pnl_pct(entry_price, exit_price, market)
     entry_dt     = datetime.strptime(pos["entry_date"], "%Y-%m-%d")
     exit_dt      = datetime.strptime(exit_date, "%Y-%m-%d")
     holding_days = (exit_dt - entry_dt).days
@@ -292,7 +397,13 @@ def _close_position(pos: dict, exit_price: float, exit_date: str, reason: str) -
         "entry_price":    entry_price,
         "exit_date":      exit_date,
         "exit_price":     exit_price,
-        "pnl_pct":        pnl_pct,
+        "pnl_pct":        pnl_pct,          # 已扣來回成本
+        "gross_pnl_pct":  gross_pct,
+        "fee_pct":        round(ROUND_TRIP_FEE.get(market, 0.0) * 100, 3),
+        "signal_price":   pos.get("signal_price"),
+        "entry_fill_date": pos.get("entry_fill_date"),
+        "exit_signal_price": pos.get("exit_signal_price"),
+        "exit_signal_bar_date": pos.get("exit_signal_bar_date"),
         "exit_reason":    reason,
         "holding_days":   holding_days,
         "trend_score":    pos.get("trend_score"),
@@ -362,33 +473,77 @@ def get_closed_positions(market: Optional[str] = None, limit: int = 100) -> list
     return sorted(positions, key=lambda p: p.get("exit_date", ""), reverse=True)[:limit]
 
 
+def _combined_stats(rows: list) -> dict:
+    """rows: [{"pnl": float, "closed": bool, ...}]；盯市統計（已平倉用實現損益，持倉用未實現損益）。"""
+    n = len(rows)
+    if n == 0:
+        return {"count": 0, "wins": 0, "losses": 0, "flat": 0, "win_rate": None,
+                "avg_pnl": None, "total_pnl": None, "realized_count": 0, "open_count": 0}
+    wins   = sum(1 for r in rows if r["pnl"] > 0)
+    losses = sum(1 for r in rows if r["pnl"] < 0)
+    return {
+        "count":      n,
+        "wins":       wins,
+        "losses":     losses,
+        "flat":       n - wins - losses,
+        # 勝率只計有漲跌的部位；平盤（多為剛進場、尚無第二根 K 棒）另列，避免壓低勝率
+        "win_rate":   round(wins / (wins + losses) * 100, 1) if (wins + losses) else None,
+        "avg_pnl":    round(sum(r["pnl"] for r in rows) / n, 2),
+        "total_pnl":  round(sum(r["pnl"] for r in rows), 2),
+        "realized_count": sum(1 for r in rows if r["closed"]),
+        "open_count":     sum(1 for r in rows if not r["closed"]),
+    }
+
+
 def get_summary() -> dict:
-    """取得整體績效摘要"""
+    """
+    取得整體績效摘要。
+
+    已實現統計（win_rate/avg_pnl_pct...）只含已平倉部位。由於出場規則（ST 翻空且跌破進場價）
+    只會讓「虧損單」平倉、獲利單會一路續抱，單看已實現會系統性偏向虧損、勝率偏低，
+    因此另外提供 combined（已實現＋未實現，盯市）供判斷真實狀況。
+    """
     data    = _load()
     closed  = data.get("closed", [])
     open_p  = data.get("open", [])
 
-    if not closed:
+    pnl_list = [p["pnl_pct"] for p in closed]
+    wins     = [p for p in pnl_list if p > 0]
+    open_pnl = [p.get("current_pnl_pct", 0) for p in open_p if p.get("current_pnl_pct") is not None]
+
+    # ── 盯市（已實現＋未實現）──────────────────────────────────
+    def _row(p, is_closed):
+        pnl = p["pnl_pct"] if is_closed else p.get("current_pnl_pct")
+        if pnl is None:
+            return None
         return {
-            "total_closed":   0,
-            "win_rate":       None,
-            "avg_pnl_pct":    None,
-            "total_pnl_pct":  None,
-            "best_trade":     None,
-            "worst_trade":    None,
-            "avg_hold_days":  None,
-            "open_count":     len(open_p),
-            "open_unrealized_pct": None,
+            "pnl": pnl, "closed": is_closed, "symbol": p["symbol"],
+            "market": p.get("market", ""), "timing": p.get("entry_timing"),
+            "sector": p.get("sector") or "未分類",
+        }
+    rows = [r for r in ([_row(p, True) for p in closed] + [_row(p, False) for p in open_p]) if r]
+
+    combined = _combined_stats(rows)
+    if rows:
+        b, w = max(rows, key=lambda r: r["pnl"]), min(rows, key=lambda r: r["pnl"])
+        combined["best"]  = {"symbol": b["symbol"], "pnl_pct": b["pnl"], "closed": b["closed"]}
+        combined["worst"] = {"symbol": w["symbol"], "pnl_pct": w["pnl"], "closed": w["closed"]}
+
+    by_market = {}
+    for mk in sorted({r["market"] for r in rows if r["market"]}):
+        mrows = [r for r in rows if r["market"] == mk]
+        by_market[mk] = {
+            "combined":   _combined_stats(mrows),
+            "realized":   _combined_stats([r for r in mrows if r["closed"]]),
+            "unrealized": _combined_stats([r for r in mrows if not r["closed"]]),
         }
 
-    pnl_list    = [p["pnl_pct"] for p in closed]
-    wins        = [p for p in pnl_list if p > 0]
-    open_pnl    = [p.get("current_pnl_pct", 0) for p in open_p if p.get("current_pnl_pct") is not None]
+    # 進場時機（🟢🟡🔴）盯市統計：驗證 Claude 的進場時機判斷是否有區分度
+    timing_all = {}
+    for t in sorted({r["timing"] for r in rows if r["timing"]}):
+        timing_all[t] = _combined_stats([r for r in rows if r["timing"] == t])
 
-    best  = max(closed, key=lambda p: p["pnl_pct"])
-    worst = min(closed, key=lambda p: p["pnl_pct"])
-
-    # ── 按進場時機分組統計 ──────────────────────────────────────
+    # ── 按進場時機分組統計（僅已實現）──────────────────────────
     timing_stats: dict[str, dict] = {}
     for p in closed:
         t = p.get("entry_timing")
@@ -437,17 +592,22 @@ def get_summary() -> dict:
         s["total_pnl"] = round(s["total_pnl"], 2)
     monthly_list = sorted(monthly.items())
 
+    best  = max(closed, key=lambda p: p["pnl_pct"]) if closed else None
+    worst = min(closed, key=lambda p: p["pnl_pct"]) if closed else None
+
     return {
         "total_closed":   len(closed),
-        "win_rate":       round(len(wins) / len(closed) * 100, 1),
-        "avg_pnl_pct":    round(sum(pnl_list) / len(pnl_list), 2),
-        "total_pnl_pct":  round(sum(pnl_list), 2),
-        "best_trade":     {"symbol": best["symbol"], "pnl_pct": best["pnl_pct"], "exit_date": best["exit_date"]},
-        "worst_trade":    {"symbol": worst["symbol"], "pnl_pct": worst["pnl_pct"], "exit_date": worst["exit_date"]},
-        "avg_hold_days":  round(sum(p.get("holding_days", 0) for p in closed) / len(closed), 1),
+        "win_rate":       round(len(wins) / len(closed) * 100, 1) if closed else None,
+        "avg_pnl_pct":    round(sum(pnl_list) / len(pnl_list), 2) if closed else None,
+        "total_pnl_pct":  round(sum(pnl_list), 2) if closed else None,
+        "best_trade":     {"symbol": best["symbol"], "pnl_pct": best["pnl_pct"], "exit_date": best["exit_date"]} if best else None,
+        "worst_trade":    {"symbol": worst["symbol"], "pnl_pct": worst["pnl_pct"], "exit_date": worst["exit_date"]} if worst else None,
+        "avg_hold_days":  round(sum(p.get("holding_days", 0) for p in closed) / len(closed), 1) if closed else None,
         "open_count":     len(open_p),
         "open_unrealized_pct": round(sum(open_pnl) / len(open_pnl), 2) if open_pnl else None,
-        # 新增分析維度
+        "combined":       combined,
+        "by_market":      by_market,
+        "timing_stats_all": timing_all,
         "timing_stats":   timing_stats,
         "sector_stats":   [{"sector": s, **v} for s, v in sector_list],
         "monthly_stats":  [{"month": m, **v} for m, v in monthly_list],
