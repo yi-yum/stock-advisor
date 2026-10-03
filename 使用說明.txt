@@ -579,6 +579,18 @@
       美股全部/任何過濾後相對全市場的 alpha 皆為負且不顯著（全市場等權 Sharpe 1.13）
     結論：這些過濾規則是台股特有（或多重比較下的假象），不可套用到美股；美股暫無有效的假訊號過濾。
 
+    ── Claude 分析的 A/B 對照與結構化輸出（2026-10-03，提示詞 v2）──
+    目的：掃描當日分析的證據顯示燈號(🟢🟡🔴)無鑑別力、WATCH 翻多評級僅勉強有序，但全部訊號都被分析，
+    無對照組可檢驗。因此：
+      · 每日 BUY/WATCH 以 (市場,日期,代號) 雜湊固定抽 30% 為對照組：不做 Claude 分析（get_scan_candidates
+        回傳 'control'；save_claude_analysis 會自動以 claude_analysis=None、ab_group='control' 併入存檔）。
+      · 分析組輸出最後一行【結構化】JSON：BUY {action,p_hold,fakeout_risk,invalid_below}；
+        WATCH {p_flip,flip_quality,action}；存檔時解析成 claude_struct，並記錄 prompt_version。
+      · 提示詞 v2：輸出更簡潔；移除 RSI/量比硬性門檻與「歷史EV」錨定；加入大盤三重ST狀態＋旺淡季（台股回測有顯著
+        超額、美股無）與距60日高點；要求機率誠實校準。
+      · 檢驗：python claude_eval.py（A/B 超額報酬差、p_hold／p_flip 校準）。建議累積 2–3 個月再看；
+        網頁仍保留燈號顯示，但目前沒有證據支持以燈號作進場決策。
+
     進場當天確認（日 K proxy，37,733 筆）：
     · 進場日收紅（close > open）：44.0% WR，+5.04% EV  ← 強過濾效果
     · 進場日收黑：29.5% WR，-0.52% EV

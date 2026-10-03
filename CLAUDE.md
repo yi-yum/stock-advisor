@@ -34,7 +34,7 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 sys.path.insert(0, r'C:\Users\User\stock-advisor')
 from claude_scanner_analysis import get_scan_candidates, build_buy_prompt, build_watch_prompt
 data = get_scan_candidates('tw')
-print(f"BUY: {len(data['buy'])}, WATCH: {len(data['watch'])}, date: {data['date_str']}")
+print(f"BUY: {len(data['buy'])}, WATCH: {len(data['watch'])}, 對照組(不分析): {len(data['control'])}, date: {data['date_str']}")
 for s in data['buy']:
     print(f"===BUY:{s['symbol']}===")
     print(build_buy_prompt(s, 'tw'))
@@ -43,9 +43,10 @@ for s in data['watch']:
     print(build_watch_prompt(s, 'tw'))
 ```
 
-步驟 2：逐支閱讀提示詞並撰寫分析（不設數量上限，全部完成）：
-- BUY 格式：【狀態診斷】【支撐壓力分析】【進場時機評估】🟢/🟡/🔴【操作建議】【持倉管理】
-- WATCH 格式：【目前缺口】【翻多可能性評估】⭐高/中/低【翻多所需條件】【若不翻多的風險】【操作建議】【風險評級】
+步驟 2：逐支閱讀提示詞並撰寫分析（清單只含「分析組」，對照組由系統自動排除，不要自行補寫）：
+- 嚴格依各提示詞末段的格式輸出，簡潔（每段 1–3 句）；
+- 最後一行必須是【結構化】單行 JSON（BUY：action/p_hold/fakeout_risk/invalid_below；WATCH：p_flip/flip_quality/action），
+  機率要誠實校準，不確定給中間值，勿一律給高分。
 
 步驟 3：用 Bash 執行 Python 儲存，在 Python 程式碼中直接內嵌 JSON 資料：
 ```python

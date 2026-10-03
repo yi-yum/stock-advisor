@@ -8,6 +8,7 @@
   save_claude_analysis(market, results, meta, date)  → 儲存分析結果
   get_latest_claude_results(market)     → 讀取最新結果（前端/API 用）
 """
+import hashlib
 import json
 import re
 import logging
@@ -21,6 +22,88 @@ from json_utils import atomic_write_json
 logger = logging.getLogger("claude_scanner_analysis")
 SCAN_RESULTS_DIR   = Path(__file__).parent / "scan_results"
 BACKTEST_STATS_DIR = Path(__file__).parent / "backtest_results"
+
+# ── A/B 對照與提示詞版本 ──────────────────────────────────────────────────────
+# 為了日後能檢驗「Claude 分析是否有用」，一部分訊號固定不做 Claude 分析（對照組）。
+# 分組以 (市場, 日期, 代號) 雜湊決定，結果可重現，不會因重跑而改變。
+PROMPT_VERSION = "v2"
+CONTROL_RATIO  = 0.30   # 對照組比例（不分析，只保留訊號與後續績效）
+
+
+def ab_group(market: str, date_str: str, symbol: str) -> str:
+    """回傳 'claude'（做分析）或 'control'（對照組，不分析）。"""
+    h = hashlib.sha256(f"{market}|{date_str}|{symbol}".encode()).digest()
+    return "control" if (int.from_bytes(h[:4], "big") % 10000) / 10000 < CONTROL_RATIO else "claude"
+
+
+_STRUCT_RE = re.compile(r"【結構化】[^{]*(\{[^{}]*\})")
+
+
+def parse_structured(text: str | None) -> dict | None:
+    """從分析文字解析【結構化】JSON（取最後一個）；格式錯誤回傳 None。"""
+    if not text:
+        return None
+    ms = _STRUCT_RE.findall(text)
+    for raw in reversed(ms):
+        try:
+            d = json.loads(raw)
+            if isinstance(d, dict) and ("p_hold" in d or "p_flip" in d):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+_MARKET_CTX_CACHE: dict = {}
+
+
+def _market_context(market: str) -> str:
+    """大盤環境提示（台股：大盤三重ST綠燈數＋旺淡季；美股：僅提示環境，無已驗證規則）。"""
+    key = (market, datetime.now().strftime("%Y%m%d"))
+    if key in _MARKET_CTX_CACHE:
+        return _MARKET_CTX_CACHE[key]
+    month = datetime.now().month
+    season = "旺季(10–4月)" if month not in {5, 6, 7, 8, 9} else "淡季(5–9月)"
+    text = ""
+    try:
+        import yfinance as yf
+        from signal_engine import _supertrend
+        tk = "^TWII" if market == "tw" else "^GSPC"
+        df = yf.Ticker(tk).history(period="6mo", auto_adjust=True)
+        h, l, c = (df[k].dropna().values.astype(float) for k in ("High", "Low", "Close"))
+        green = sum(1 for p, m in [(11, 2.0), (10, 1.0), (12, 3.0)] if _supertrend(h, l, c, p, m)[0][-1] == 1)
+        idx = "加權指數" if market == "tw" else "S&P500"
+        text = f"\n【大盤環境】{idx}三重ST：{green}/3 綠；目前月份屬{season}"
+        if market == "tw":
+            text += "\n（回測參考：台股在「大盤3綠且旺季」進場，平均超額約 +1%/筆且統計顯著；其餘時段無明顯超額。僅供參考，非進場規則）"
+        else:
+            text += "\n（回測參考：美股未發現有效的大盤/季節過濾規則）"
+    except Exception as e:
+        logger.warning(f"大盤環境取得失敗: {e}")
+    _MARKET_CTX_CACHE[key] = text
+    return text
+
+
+def _dist_high_text(stock: dict) -> str:
+    ind = stock.get("indicators", {})
+    h60, close = ind.get("high60"), stock.get("close")
+    try:
+        return f"\n距60日高點：{(close / h60 - 1) * 100:+.1f}%" if h60 and close else ""
+    except Exception:
+        return ""
+
+
+_STRUCT_BUY = (
+    '【結構化】（最後一行，單行 JSON，不可省略）\n'
+    '{"action":"enter|wait|skip","p_hold":0-100,"fakeout_risk":"低|中|高","invalid_below":數字}\n'
+    '說明：p_hold = 你估計「進場後 10 個交易日內不被停損洗出」的機率（整數 0–100，需誠實校準，'
+    '不確定就給中間值，勿一律給高分）；enter=🟢、wait=🟡、skip=🔴。'
+)
+_STRUCT_WATCH = (
+    '【結構化】（最後一行，單行 JSON，不可省略）\n'
+    '{"p_flip":0-100,"flip_quality":"低|中|高","action":"watch|enter_on_flip|skip"}\n'
+    '說明：p_flip = 你估計「未來 5 個交易日內第三條 ST 翻多、升級為 BUY」的機率（整數 0–100，需誠實校準，勿一律給高分）。'
+)
 
 
 # ── 歷史回測績效 ──────────────────────────────────────────────────────────────
@@ -320,7 +403,7 @@ def build_buy_prompt(stock: dict, market: str) -> str:
     bt_stats_text = _fmt_backtest_stats(stock.get('backtest_stats'))
     bt_section = f"\n【歷史回測績效（本股三重ST訊號）】\n{bt_stats_text}"
 
-    chip_row = "\n- 籌碼：法人方向是否配合（台股）" if market == "tw" else ""
+    chip_row = "、法人籌碼方向" if market == "tw" else ""
 
     earnings_section = ""
     if market == "us":
@@ -341,12 +424,14 @@ def build_buy_prompt(stock: dict, market: str) -> str:
     return f"""你是資深{market_label}技術分析師，專精「三重 SuperTrend」趨勢追蹤策略。
 訊號用途：隔日開盤進場，核心問題是「今日突破是真是假？」。
 
-【重要：輸出格式規定】所有價格只寫數字，勿加貨幣符號。
+【重要：輸出格式規定】所有價格只寫數字，勿加貨幣符號。簡潔輸出，每個段落 1–3 句，不要逐項羅列。
+【判斷原則】回測顯示單一指標（RSI、量比、K線型態）對假突破的辨識力不穩定，不要當作硬性門檻；
+歷史EV/勝率樣本小、有倖存者偏誤，僅作背景，不要被它錨定。請權衡多項證據並如實反映不確定性。
 
 【今日訊號資料】
 代號：{stock.get('symbol')}{name_display}　板塊：{stock.get('sector', '')}
 收盤：{close}　漲跌：{stock.get('change_pct', 0):+.1f}%
-RSI：{stock.get('rsi')}　量比：{stock.get('volume_ratio', 1):.1f}x{chip_section}{margin_section}{history_section}{bt_section}{earnings_section}
+RSI：{stock.get('rsi')}　量比：{stock.get('volume_ratio', 1):.1f}x{chip_section}{margin_section}{history_section}{bt_section}{earnings_section}{_market_context(market)}{_dist_high_text(stock)}
 
 【SuperTrend 狀態】三條全部翻多（今日觸發）
 {reasons_text}
@@ -360,25 +445,19 @@ RSI：{stock.get('rsi')}　量比：{stock.get('volume_ratio', 1):.1f}x{chip_sec
 請依照以下格式輸出分析（繁體中文，語氣專業直接）：
 
 【突破背景】
-說明今日是「整理後首次突破」還是「連漲後翻多」，近期K線型態（盤整突破 / V型反彈 / 追高），以及本股歷史EV/勝率是否支持進場。
+整理後首次突破，還是連漲後翻多？K線型態與歷史表現是否支持進場？
 
 【假突破風險評估】低 / 中 / 高
-逐項判斷：
-- 量能：今日量比（>1.5x 理想，<1.0x 為警訊）
-- K線型態：今日實體大小、是否有明顯上影線
-- RSI：是否偏高（>75 為警訊）
-- 近期背景：連漲幾日後觸發（3日以上風險偏高）{chip_row}
+綜合量能、K線、近期漲幅背景{chip_row}，說明主要疑慮或支持理由。
 綜合結論：低 / 中 / 高
 
 【明日開盤建議】🟢 / 🟡 / 🔴
-選一種並說明具體條件：
-- 🟢 直接進場：假突破風險低，開盤可介入
-- 🟡 等確認再進：說明要看什麼（如：開盤後守住 XXX 以上再買）
-- 🔴 跳過本次：說明原因（EV偏差 / 假突破風險高 / 連漲過多）
+🟢 直接進場　🟡 等確認再進（說明要看什麼）　🔴 跳過（說明原因）
 
 【失效條件】
-收盤跌破 {sl_hint} 視為假突破，出場不等
-（止盈參考：{tp_hint}）"""
+收盤跌破 {sl_hint} 視為假突破，出場不等（止盈參考：{tp_hint}）
+
+{_STRUCT_BUY}"""
 
 
 def build_watch_prompt(stock: dict, market: str) -> str:
@@ -446,7 +525,7 @@ def build_watch_prompt(stock: dict, market: str) -> str:
     bt_stats_text = _fmt_backtest_stats(stock.get('backtest_stats'))
     bt_section = f"\n【歷史回測績效（本股三重ST訊號）】\n{bt_stats_text}"
 
-    chip_row = "\n- 籌碼方向（台股）" if market == "tw" else ""
+    chip_row = "、法人籌碼方向" if market == "tw" else ""
 
     earnings_section_w = ""
     if market == "us":
@@ -467,7 +546,9 @@ def build_watch_prompt(stock: dict, market: str) -> str:
     return f"""你是資深技術分析師，專精三重 SuperTrend 策略。
 訊號用途：等待第三條ST翻多進入BUY後隔日進場，先評估翻多機率與翻多後的訊號品質。
 
-【重要：輸出格式規定】所有價格只寫數字，不加貨幣符號。
+【重要：輸出格式規定】所有價格只寫數字，不加貨幣符號。簡潔輸出，每個段落 1–3 句，不要逐項羅列。
+【判斷原則】單一指標（RSI、量比）對翻多的預測力不穩定，不要當作硬性門檻；歷史EV/勝率僅作背景，不要被它錨定。
+大多數 WATCH 不會在短期內翻多，請以此為基準率，有明確證據才給高機率。
 
 【WATCH 訊號資料】
 代號：{stock.get('symbol')}{name_display}　板塊：{stock.get('sector', '')}
@@ -475,7 +556,7 @@ def build_watch_prompt(stock: dict, market: str) -> str:
 RSI：{_fmt(rsi)}　量比：{_fmt(vr)}x
 EMA20：{_fmt(ema20)}　EMA50：{_fmt(ema50)}
 20日區間：{_fmt(low20)} ~ {_fmt(high20)}
-ATR(14)：{_fmt(atr)}{chip_section}{margin_section}{history_section}{bt_section}{earnings_section_w}
+ATR(14)：{_fmt(atr)}{chip_section}{margin_section}{history_section}{bt_section}{earnings_section_w}{_market_context(market)}{_dist_high_text(stock)}
 
 【三重 SuperTrend 狀態】2/3 已翻多，待第三條確認
 {reasons_text}
@@ -487,24 +568,22 @@ ATR(14)：{_fmt(atr)}{chip_section}{margin_section}{history_section}{bt_section}
 請依照以下格式輸出分析（繁體中文，語氣專業直接）：
 
 【目前缺口】
-說明 {red_desc} 仍為空方的原因：距ST壓力線大約幾個ATR、目前趨勢動能強弱。
+{red_desc} 仍為空方的原因：距ST壓力線約幾個ATR、趨勢動能強弱。
 
 【翻多可能性評估】高 / 中 / 低
-逐項判斷：
-- RSI動能方向（上升 / 橫盤 / 下降）
-- 量能配合度（近期是否有放量傾向）
-- 近期K線型態（連漲 / 整理 / 回測支撐）
-- 距ST壓力估算（幾個ATR）{chip_row}
+綜合動能方向、量能、K線型態、距ST壓力（幾個ATR）{chip_row}。
 綜合結論：高 / 中 / 低
 
 【翻多所需條件】
-具體說明：需突破哪個價位、量能需達多少
+需突破的價位與量能。
 
 【翻多後的假突破風險】低 / 中 / 高
-若第三條ST翻多觸發BUY，評估該訊號的可靠度（依據EV/WR、當下RSI位置、近期漲幅背景）
+一句話說明。
 
 【操作建議】觀望等待 / 等翻多確認後進場 / 不建議介入
-【風險評級】低 / 中 / 高"""
+【風險評級】低 / 中 / 高
+
+{_STRUCT_WATCH}"""
 
 
 # ── 籌碼資料 ──────────────────────────────────────────────────────────────────
@@ -710,9 +789,16 @@ def get_scan_candidates(market: str, date_str: str = None) -> dict:
         sym = r.get("symbol", "")
         r["backtest_stats"] = bt_stats.get(sym)
 
+    # A/B：對照組不做分析（save_claude_analysis 會自動把它們以 claude_analysis=None 併入存檔）
+    for r in results:
+        r["ab_group"] = ab_group(market, date_str, r.get("symbol", ""))
+    control = [r for r in results if r["ab_group"] == "control" and r.get("signal") in ("BUY", "WATCH")]
+    results = [r for r in results if r["ab_group"] == "claude"]
+
     return {
         "buy":         [r for r in results if r.get("signal") == "BUY"],
         "watch":       [r for r in results if r.get("signal") == "WATCH"],
+        "control":     control,
         "meta":        meta,
         "date_str":    date_str,
         "source_file": str(scan_file),
@@ -737,12 +823,40 @@ def save_claude_analysis(
     if date_str is None:
         date_str = datetime.now().strftime("%Y%m%d")
 
+    # 結構化欄位、分組與提示詞版本
+    for r in results:
+        r["claude_struct"]   = parse_structured(r.get("claude_analysis"))
+        r["ab_group"]        = "claude"
+        r["prompt_version"]  = PROMPT_VERSION
+    n_analyzed = len(results)
+    bad = [r.get("symbol") for r in results if r["claude_struct"] is None]
+    if bad:
+        logger.warning(f"{len(bad)} 支缺少或無法解析【結構化】JSON: {bad[:10]}")
+
+    # 自動併入對照組（原始掃描資料，不含分析），供日後 A/B 比較
+    try:
+        analyzed = {r.get("symbol") for r in results}
+        scan_file = SCAN_RESULTS_DIR / f"{market}_{date_str}.json"
+        raw = json.load(open(scan_file, encoding="utf-8")).get("results", []) if scan_file.exists() else []
+        for r in raw:
+            sym = r.get("symbol", "")
+            if r.get("signal") in ("BUY", "WATCH") and sym not in analyzed \
+                    and ab_group(market, date_str, sym) == "control":
+                c = dict(r)
+                c.update(claude_analysis=None, claude_struct=None, ab_group="control",
+                         prompt_version=PROMPT_VERSION)
+                results.append(c)
+    except Exception as e:
+        logger.warning(f"併入對照組失敗: {e}")
+
     output = {
         "market":               market,
         "scan_time":            meta.get("scan_time", ""),
         "total_scanned":        meta.get("total_scanned", 0),
         "pre_screened":         meta.get("pre_screened", 0),
-        "claude_analyzed":      len(results),
+        "claude_analyzed":      n_analyzed,
+        "prompt_version":       PROMPT_VERSION,
+        "control_ratio":        CONTROL_RATIO,
         "claude_analysis_time": datetime.now().isoformat(),
         "results":              results,
     }
@@ -843,7 +957,7 @@ def build_daily_summary_prompt(date_str: str = None) -> str:
         change  = r.get("change_pct", 0)
         vr      = r.get("volume_ratio", 1)
         sector  = r.get("sector", "")
-        analysis = r.get("claude_analysis") or "（無分析）"
+        analysis = r.get("claude_analysis") or "（對照組，未分析）"
         # 只取前 600 字，避免 prompt 過長
         analysis_short = analysis[:600] + "..." if len(analysis) > 600 else analysis
         name_display = f"（{name}）" if name and name != sym else ""
