@@ -36,7 +36,8 @@ from signal_engine import _supertrend
 COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
          "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT"]
 
-# ── Per-coin 最佳策略配置（來自優化結果 2023-2026）─────────────────────────────
+# ── Per-coin 策略配置（來自優化結果 2023-2026，屬『樣本內』挑選，績效不可直接採信；
+#    樣本外驗證見 crypto_oos_validation.py / crypto_unified_params.py / crypto_data_audit.py）──
 # strategy: "VB" / "3ST" / "DC" / "EMA"
 COIN_BEST = {
     "BTCUSDT":  {"strategy": "VB",  "atr_thresh": 0.9,  "squeeze_bars": 20, "tp_mult": 1.0, "trend_filter": True},
