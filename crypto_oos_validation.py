@@ -44,7 +44,7 @@ def run_cfg(sym, cfg, df, df_d=None):
         return b.backtest_triple_st(df, long_only=cfg.get("mode", "long_only") == "long_only", stop_loss_pct=cfg.get("stop_loss"), bull_mask=bull)
     if st == "DC":
         return b.backtest_donchian(df, entry_period=cfg["entry_period"], exit_period=cfg["exit_period"], stop_pct=cfg["stop_pct"])
-    return b.backtest_ema_cross(df, fast=cfg["fast"], slow=cfg["slow"], trend=cfg["trend"], stop_pct=cfg["stop_pct"])
+    return b.backtest_ema_cross(df, fast=cfg["fast"], slow=cfg["slow"], trend=cfg["trend"], stop_pct=cfg["stop_pct"], long_only=cfg.get("long_only", False))
 
 
 def hold(df):
